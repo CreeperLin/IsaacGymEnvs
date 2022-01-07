@@ -39,11 +39,13 @@ from tasks.ingenuity import Ingenuity
 from tasks.quadcopter import Quadcopter
 from tasks.shadow_hand import ShadowHand
 from isaacgymenvs.tasks.trifinger import Trifinger
+from tasks.antjoust import AntJoust
 
 # Mappings from strings to environments
 isaacgym_task_map = {
     "AllegroHand": AllegroHand,
     "Ant": Ant,
+    "AntJoust": AntJoust,
     "Anymal": Anymal,
     "AnymalTerrain": AnymalTerrain,
     "BallBalance": BallBalance,
