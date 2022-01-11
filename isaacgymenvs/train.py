@@ -56,6 +56,7 @@ OmegaConf.register_new_resolver('if', lambda pred, a, b: a if pred else b)
 # allows us to resolve default arguments which are copied in multiple places in the config. used primarily for
 # num_ensv
 OmegaConf.register_new_resolver('resolve_default', lambda default, arg: default if arg=='' else arg)
+OmegaConf.register_new_resolver('resolve_eval', lambda fx, *args: eval(fx)(*args))
 
 @hydra.main(config_name="config", config_path="./cfg")
 def launch_rlg_hydra(cfg: DictConfig):

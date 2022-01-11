@@ -28,9 +28,11 @@
 
 from typing import Dict, Any, Tuple
 
+import math
 import numpy as np
 import os
 import torch
+from torch import Tensor
 
 from isaacgym import gymtorch
 from isaacgym import gymapi
@@ -73,17 +75,23 @@ class AntJoust(VecTask):
         print('actors', self.num_agents)
         num_obs_self = 60
         num_obs_per_rng = 28
-        max_num_obs_rng = min(3, self.num_agents - 1)
-        num_obs = num_obs_self + num_obs_per_rng * max_num_obs_rng
+        self.max_num_obs_rng = min(self.cfg["env"].get("numObsRangeAgents", 1), self.num_agents - 1)
+        num_obs = num_obs_self + num_obs_per_rng * self.max_num_obs_rng
+        num_acts = 8
         self.num_space_parts = self.cfg["env"].get("numSpacePartitions", 1)
         self.space_mult = self.num_agents // self.num_space_parts
         self.cfg["env"]["numObservations"] = num_obs * self.space_mult
-        self.cfg["env"]["numActions"] = 8 * self.space_mult
+        self.cfg["env"]["numActions"] = num_acts * self.space_mult
 
         self._act_part_pt = 0
         self._actions_parts = []
 
-        super().__init__(config=self.cfg, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless)
+        super().__init__(
+            config=self.cfg, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless
+        )
+
+        self.actions = torch.zeros((self.num_envs, num_acts * self.num_agents), device=self.device, dtype=torch.float)
+        self.terminated_buf = torch.zeros((self.num_envs, self.num_agents), device=self.device, dtype=torch.bool)
 
         print('dof', self.num_dof)
         print('dof limit', self.dof_limits_lower)
@@ -152,6 +160,37 @@ class AntJoust(VecTask):
         # self.potentials = to_torch([-1000./self.dt], device=self.device).repeat(self.num_envs)
         self.potentials = to_torch([-1000./self.dt], device=self.device).repeat(self.num_envs, self.num_agents)
         self.prev_potentials = self.potentials.clone()
+
+    def set_viewer(self):
+        """Create the viewer."""
+
+        # todo: read from config
+        self.enable_viewer_sync = True
+        self.viewer = None
+
+        # cam_pos = [20.0, 25.0, 3.0]
+        # cam_target = [10.0, 15.0, 0.0]
+        cam_pos = [0, 0, 3.0]
+        cam_target = [1.0, 1.5, 0.0]
+
+        # if running with a viewer, set up keyboard shortcuts and camera
+        if self.headless == False:
+            # subscribe to keyboard shortcuts
+            self.viewer = self.gym.create_viewer(
+                self.sim, gymapi.CameraProperties())
+            self.gym.subscribe_viewer_keyboard_event(
+                self.viewer, gymapi.KEY_ESCAPE, "QUIT")
+            self.gym.subscribe_viewer_keyboard_event(
+                self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
+
+            # set the camera position based on up axis
+            sim_params = self.gym.get_sim_params(self.sim)
+            if sim_params.up_axis != gymapi.UP_AXIS_Z:
+                cam_pos = [cam_pos[0], cam_pos[2], cam_pos[1]]
+                cam_target = [cam_target[0], cam_target[2], cam_target[1]]
+
+            self.gym.viewer_camera_look_at(
+                self.viewer, None, gymapi.Vec3(*cam_pos), gymapi.Vec3(*cam_target))
 
     def create_sim(self):
         self.up_axis_idx = self.set_sim_params_up_axis(self.sim_params, 'z')
@@ -231,9 +270,18 @@ class AntJoust(VecTask):
             (0.06, 0.97, 0.38),
         ]
 
-        pos = 1 + torch.rand(self.num_envs, self.num_agents, 3)
-        pos *= torch.sign(torch.randn_like(pos))
+        # pos = 10 + torch.rand(self.num_envs, self.num_agents, 3)
+        # pos *= torch.sign(torch.randn_like(pos))
+        # pos = torch.ones(self.num_envs, self.num_agents, 3)
+        init_pos_radius = self.num_agents_team * 1
+        pos = torch.arange(0, self.num_agents) * 2. * math.pi / self.num_agents
+        pos = pos.repeat(3, self.num_envs).T.view(self.num_envs, self.num_agents, -1)
+        pos[:, :, 0].cos_()
+        pos[:, :, 1].sin_()
+        pos.mul_(init_pos_radius)
+        pos += torch.randn(self.num_envs, self.num_agents, 3)
         pos[:, :, self.up_axis_idx] = 0
+        # print(pos)
 
         for i in range(self.num_envs):
             # create env instance
@@ -245,7 +293,8 @@ class AntJoust(VecTask):
                 start_pose = gymapi.Transform()
                 start_pose.p = gymapi.Vec3(*get_axis_params(0.44, self.up_axis_idx))
                 start_pose.p += gymapi.Vec3(*pos[i][k].tolist())
-                ant_handle = self.gym.create_actor(env_ptr, ant_asset, start_pose, "ant", i, 1, 0)
+                # ant_handle = self.gym.create_actor(env_ptr, ant_asset, start_pose, "ant", i, 1, 0)
+                ant_handle = self.gym.create_actor(env_ptr, ant_asset, start_pose, "ant", i, 0, 0)
                 # ant_handle = self.gym.create_actor(env_ptr, ant_asset, start_pose, "ant", 0, 1, 0)
                 self.ant_handles.append(ant_handle)
 
@@ -272,10 +321,11 @@ class AntJoust(VecTask):
             self.extremities_index[i] = self.gym.find_actor_rigid_body_handle(
                 self.envs[0], self.ant_handles[0], extremity_names[i])
 
-    def compute_reward(self, actions):
-        rew_buf, reset_buf = compute_ant_reward(
+    def compute_reward(self):
+        rew_buf, reset_buf, terminated_buf = compute_ant_reward(
             self.obs_buf,
             self.reset_buf,
+            self.terminated_buf,
             self.progress_buf,
             self.actions,
             self.up_weight,
@@ -291,7 +341,7 @@ class AntJoust(VecTask):
             self.num_agents,
             self.num_teams,
         )
-        self.reset_buf[:] = reset_buf
+        self.reset_buf[:], self.terminated_buf[:] = reset_buf, terminated_buf
         if self.num_space_parts > 1:
             self.rew_buf[:] = rew_buf[:, self._act_part_pt]
         else:
@@ -306,6 +356,7 @@ class AntJoust(VecTask):
 
         obs_buf, potentials, prev_potentials, up_vec, heading_vec = compute_ant_observations(
             self.obs_buf,
+            self.terminated_buf,
             self.root_states,
             self.targets,
             self.potentials,
@@ -324,6 +375,7 @@ class AntJoust(VecTask):
             self.up_axis_idx,
             self.num_agents,
             self.num_teams,
+            self.max_num_obs_rng,
         )
         self.potentials[:], self.prev_potentials[:], self.up_vec[:], self.heading_vec[:] =\
             potentials, prev_potentials, up_vec, heading_vec
@@ -369,6 +421,11 @@ class AntJoust(VecTask):
 
         self.progress_buf[env_ids] = 0
         self.reset_buf[env_ids] = 0
+        self.terminated_buf[env_ids] = 0
+        # print('reset', env_ids, self.terminated_buf)
+
+    def terminate_idx(self, agent_ids):
+        pass
 
     def pre_physics_step(self, actions):
         actions = actions.clone().to(self.device)
@@ -385,7 +442,12 @@ class AntJoust(VecTask):
                 # return
         else:
             self.actions = actions
-        # print('actions', self.actions.shape)
+        # print('actions', self.actions)
+        # print('tb', self.terminated_buf)
+        # print('as', self.actions.view(self.num_envs, self.num_agents, -1)[self.terminated_buf])
+        # self.actions.view(self.num_envs * self.num_agents, -1)[self.terminated_buf].zero_()
+        self.actions.view(self.num_envs, self.num_agents, -1)[self.terminated_buf] = 0
+        # print('asz', self.actions)
         forces = self.actions * self.joint_gears * self.power_scale
         force_tensor = gymtorch.unwrap_tensor(forces)
         self.gym.set_dof_actuation_force_tensor(self.sim, force_tensor)
@@ -399,7 +461,7 @@ class AntJoust(VecTask):
             self.reset_idx(env_ids)
 
         self.compute_observations()
-        self.compute_reward(self.actions)
+        self.compute_reward()
 
         if self.num_space_parts > 1:
             self._act_part_pt += 1
@@ -489,24 +551,24 @@ class AntJoust(VecTask):
 
 @torch.jit.script
 def compute_ant_reward(
-    obs_buf,
-    reset_buf,
-    progress_buf,
-    actions,
-    up_weight,
-    heading_weight,
-    potentials,
-    prev_potentials,
-    actions_cost_scale,
-    energy_cost_scale,
-    joints_at_limit_cost_scale,
-    termination_height,
-    death_cost,
-    max_episode_length,
-    num_agents,
-    num_teams,
-):
-    # type: (Tensor, Tensor, Tensor, Tensor, float, float, Tensor, Tensor, float, float, float, float, float, float, int, int) -> Tuple[Tensor, Tensor]
+    obs_buf: Tensor,
+    reset_buf: Tensor,
+    terminated_buf: Tensor,
+    progress_buf: Tensor,
+    actions: Tensor,
+    up_weight: float,
+    heading_weight: float,
+    potentials: Tensor,
+    prev_potentials: Tensor,
+    actions_cost_scale: float,
+    energy_cost_scale: float,
+    joints_at_limit_cost_scale: float,
+    termination_height: float,
+    death_cost: float,
+    max_episode_length: float,
+    num_agents: int,
+    num_teams: int,
+) -> Tuple[Tensor, Tensor, Tensor]:
 
     # reward from direction headed
     n_envs = obs_buf.shape[0]
@@ -556,47 +618,55 @@ def compute_ant_reward(
     terminated = z_pos < termination_height
     total_reward = torch.where(terminated, torch.ones_like(total_reward) * death_cost, total_reward)
 
-    # reset agents
-    reset_ones = torch.ones_like(reset_buf)
-    # print(terminated)
-    reset = torch.where(torch.sum(terminated, dim=-1), reset_ones, reset_buf)
-    # no team aggregate for resets
-    # reset = torch.where(torch.all(terminated, dim=-1), reset_ones, reset_buf)
-    reset = torch.where(progress_buf >= max_episode_length - 1, reset_ones, reset)
+    # print('tb', terminated_buf)
+    # print('t', terminated)
 
+    total_reward = torch.where(terminated_buf, torch.zeros_like(total_reward), total_reward)
     # print(total_reward.shape)
     total_reward = torch.sum(total_reward.view(n_envs, num_teams, -1), dim=-1)
 
-    return total_reward, reset
+    terminated = torch.logical_or(terminated, terminated_buf)
+
+    # reset agents
+    reset_ones = torch.ones_like(reset_buf)
+    # reset = torch.where(torch.sum(terminated, dim=-1), reset_ones, reset_buf)
+    # no team aggregate for resets
+    # reset = torch.where(torch.all(terminated, dim=-1), reset_ones, reset_buf)
+    reset = torch.where(
+        torch.sum(torch.all(terminated.view(n_envs, num_teams, -1), dim=-1), dim=-1), reset_ones, reset_buf
+    )
+    reset = torch.where(progress_buf >= max_episode_length - 1, reset_ones, reset)
+
+    return total_reward, reset, terminated
 
 
 @torch.jit.script
 def compute_ant_observations(
-    obs_buf,
-    root_states,
-    targets,
-    potentials,
-    inv_start_rot,
-    dof_pos,
-    dof_vel,
-    dof_limits_lower,
-    dof_limits_upper,
-    dof_vel_scale,
-    sensor_force_torques,
-    actions,
-    dt,
-    contact_force_scale,
-    basis_vec0,
-    basis_vec1,
-    up_axis_idx,
-    num_agents,
-    num_teams,
-):
-    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, float, Tensor, Tensor, float, float, Tensor, Tensor, int, int, int) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]
+    obs_buf: Tensor,
+    terminated_buf: Tensor,
+    root_states: Tensor,
+    targets: Tensor,
+    potentials: Tensor,
+    inv_start_rot: Tensor,
+    dof_pos: Tensor,
+    dof_vel: Tensor,
+    dof_limits_lower: Tensor,
+    dof_limits_upper: Tensor,
+    dof_vel_scale: float,
+    sensor_force_torques: Tensor,
+    actions: Tensor,
+    dt: float,
+    contact_force_scale: float,
+    basis_vec0: Tensor,
+    basis_vec1: Tensor,
+    up_axis_idx: int,
+    num_agents: int,
+    num_teams: int,
+    max_num_obs_rng: int,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
 
     # constants
-    th_obs_range = 3
-    max_num_obs = min(3, num_agents)
+    max_num_obs = min(max_num_obs_rng + 1, num_agents)
 
     torso_position = root_states[:, 0:3]
     torso_rotation = root_states[:, 3:7]
@@ -653,6 +723,9 @@ def compute_ant_observations(
         actions.view(n_agents, -1)
     ), dim=-1)
     # print(obs.shape)
+    # obs shape: (E*N, S)
+
+    obs[terminated_buf.flatten(), :] = 0
 
     # interactive observation
 
@@ -663,24 +736,27 @@ def compute_ant_observations(
     # pos = torso_position.
 
     # naive search
+    if num_agents > 1:
+        pos = torso_position.view(n_envs, num_agents, -1)   # (E, N, 3)
+        dist = torch.cdist(pos, pos)    # (E, N, N)
+        val, ind = torch.topk(dist, max_num_obs, largest=False)     # (E, N, M+1)
 
-    pos = torso_position.view(n_envs, num_agents, -1)
+        # print(dist.shape)
+        # print(val.shape)
+        # print(ind.shape)
+        # exit(0)
+        ind = ind[:, :, 1:]     # (E, N, M-1)
+        rng_obs = obs[ind.view(-1, ind.shape[-1])][:, :, :28]   # (E * N, M, S_r)
 
-    dist = torch.cdist(pos, pos)
-    val, ind = torch.topk(dist, max_num_obs, largest=False)
+        # print('obs', obs)
+        # print('ind', ind)
+        # print('rng', rng_obs)
+        # print(rng_obs.shape)
 
-    # print(dist.shape)
-    # print(val.shape)
-    # print(ind.shape)
-    # exit(0)
-    ind = ind[:, :, 1:]
-    rng_obs = obs[ind.view(-1, ind.shape[-1])][:, :, :28]
-    # print(rng_obs.shape)
+        obs = torch.cat((obs, rng_obs.reshape(rng_obs.shape[0], -1)), dim=-1)   # (E * N, S + M * S_r)
+        # new_obs = obs
 
-    new_obs = torch.cat((obs, rng_obs.view(rng_obs.shape[0], -1)), dim=-1)
-    # new_obs = obs
+    obs = obs.view(n_envs, -1)
+    # print(obs.shape)
 
-    new_obs = new_obs.view(n_envs, -1)
-    # print(new_obs.shape)
-
-    return new_obs, potentials, prev_potentials_new, up_vec, heading_vec
+    return obs, potentials, prev_potentials_new, up_vec, heading_vec
