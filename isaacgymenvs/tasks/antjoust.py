@@ -75,7 +75,9 @@ class AntJoust(VecTask):
         self.num_agents_export = self.cfg["env"].get("numAgentsExport", self.num_teams)
         print('actors', self.num_agents)
         num_obs_self = 60
-        num_obs_per_rng = 28
+        num_obs_per_rng = 0
+        # num_obs_per_rng += 28
+        num_obs_per_rng += 3
         self.max_num_obs_rng = min(self.cfg["env"].get("numObsRangeAgents", 1), self.num_agents - 1)
         num_obs = num_obs_self + num_obs_per_rng * self.max_num_obs_rng
         num_acts = 8
@@ -774,21 +776,6 @@ def compute_ant_observations(
     n_agents = vel_loc.shape[0]
 
     # obs_buf shapes: 1, 3, 3, 1, 1, 1, 1, 1, num_dofs(8), num_dofs(8), 24, num_dofs(8)
-    # for v in (
-    #     torso_position[:, up_axis_idx].view(-1, 1),
-    #     vel_loc,
-    #     angvel_loc,
-    #     yaw.unsqueeze(-1),
-    #     roll.unsqueeze(-1),
-    #     angle_to_target.unsqueeze(-1),
-    #     up_proj.unsqueeze(-1),
-    #     heading_proj.unsqueeze(-1),
-    #     dof_pos_scaled,
-    #     dof_vel * dof_vel_scale,
-    #     sensor_force_torques.view(-1, 24) * contact_force_scale,
-    #     actions
-    # ):
-    #     print(v.shape)
     obs = torch.cat((
         torso_position[:, up_axis_idx].view(-1, 1),
         vel_loc,
@@ -802,10 +789,9 @@ def compute_ant_observations(
         (dof_vel * dof_vel_scale).view(n_agents, -1),
         sensor_force_torques.view(-1, 24) * contact_force_scale,
         actions.view(n_agents, -1)
-    ), dim=-1)
-    # obs shape: (E*N, S)
+    ), dim=-1).view(num_envs, num_agents, -1)   # [E, N, S]
 
-    obs[terminated_buf.flatten(), :] = 0
+    obs[terminated_buf, :] = 0
 
     # interactive observation
 
@@ -815,13 +801,24 @@ def compute_ant_observations(
 
     # naive search
     if num_agents > 1:
-        pos = torso_position.view(num_envs, num_agents, -1)   # (E, N, 3)
-        dist = torch.cdist(pos, pos)    # (E, N, N)
-        pos_t = pos.T.unsqueeze(-1)     # (E, 3, N, 1)
-        rel_pos = torch.cdist(pos_t, pos_t, p=1).permute(0, 2, 3, 1)    # (E, N, N, 3)
-        val, ind = torch.topk(dist, max_num_obs, largest=False)     # (E, N, M+1)
-        ind = ind[:, :, 1:]     # (E, N, M)
-        rng_obs = obs[ind.view(-1, ind.shape[-1])][:, :, :28]   # (E * N, M, S_r)
-        obs = torch.cat((obs, rng_obs.reshape(rng_obs.shape[0], -1)), dim=-1)   # (E * N, S + M * S_r)
+        pos = torso_position.view(num_envs, num_agents, -1)   # [E, N, 3]
+        dist = torch.cdist(pos, pos)    # [E, N, N]
+        pos_t = pos.permute(0, 2, 1).unsqueeze(-1)     # [E, 3, N, 1]
+        rel_pos = torch.cdist(pos_t, pos_t, p=1.).permute(0, 2, 3, 1)    # [E, N, N, 3]
+        val, ind = torch.topk(dist, max_num_obs, largest=False)     # [E, N, M+1]
+        ind = ind[:, :, 1:]     # [E, N, M]
+        rel_obs = rel_pos[
+            torch.arange(0, num_envs).view(num_envs, 1, 1), torch.arange(0, num_agents).view(1, num_agents, 1), ind
+        ]   # [E, N, M, 3]
+        # rng_obs = obs[:, :, :28][
+        #     torch.arange(0, num_envs).view(num_envs, 1, 1), ind
+        # ]   # [E, N, M, S_r]
+        obs = torch.cat((
+            obs,
+            rel_obs.view(num_envs, num_agents, -1),
+            # rng_obs.view(num_envs, num_agents, -1),
+        ), dim=-1)   # [E, N, S + M * 3 + M * S_r]
+
+    obs = obs.view(num_envs * num_agents, -1)   # [E * N, S']
 
     return obs, potentials, prev_potentials_new, up_vec, heading_vec
