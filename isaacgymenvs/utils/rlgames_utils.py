@@ -171,7 +171,8 @@ class RLGPUEnv(vecenv.IVecEnv):
         info = {}
         info['action_space'] = self.env.action_space
         info['observation_space'] = self.env.observation_space
-        info['agents'] = self.env.num_agents
+        info['agents'] = getattr(self.env, 'num_agents_export', 1)
+        info['value_size'] = getattr(self.env, 'value_size_export', 1)
 
         if self.env.num_states > 0:
             info['state_space'] = self.env.state_space
