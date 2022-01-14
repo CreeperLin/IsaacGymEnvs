@@ -139,9 +139,14 @@ class AntJoust(VecTask):
 
         # get gym GPU state tensors
         actor_root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
+        print('actor_root_state', actor_root_state.shape)
         dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
         print('dof state', dof_state_tensor.shape)
         sensor_tensor = self.gym.acquire_force_sensor_tensor(self.sim)
+        net_contact = self.gym.acquire_net_contact_force_tensor(self.sim)
+        print('net_contact', net_contact.shape)
+        rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
+        print('rigid_body_state', rigid_body_state.shape)
 
         # sensors_per_env = 4
         sensors_per_env = 4 * self.num_agents
@@ -251,7 +256,7 @@ class AntJoust(VecTask):
 
         # cam_pos = [20.0, 25.0, 3.0]
         # cam_target = [10.0, 15.0, 0.0]
-        cam_pos = [0, 0, 3.0]
+        cam_pos = [0, 0, 15.0]
         cam_target = [1.0, 1.5, 0.0]
 
         # if running with a viewer, set up keyboard shortcuts and camera
@@ -354,7 +359,7 @@ class AntJoust(VecTask):
         # pos = 10 + torch.rand(self.num_envs, self.num_agents, 3)
         # pos *= torch.sign(torch.randn_like(pos))
         # pos = torch.ones(self.num_envs, self.num_agents, 3)
-        init_pos_radius = self.num_agents * 1.
+        init_pos_radius = self.num_agents * 0.75
         pos = torch.arange(0, self.num_agents) * 2. * math.pi / self.num_agents
         pos = pos.repeat(3, self.num_envs).T.view(self.num_envs, self.num_agents, -1)
         pos[:, :, 0].cos_()
@@ -703,16 +708,24 @@ def compute_ant_reward(
     # dof_at_limit_cost = torch.sum(dof_pos > 0.99, dim=-1)
 
     # reward for duration of staying alive
-    alive_reward = torch.ones_like(potentials) * 0.5
+    alive_reward = torch.ones_like(z_pos) * 0.5
     # progress_reward = potentials - prev_potentials
 
     # ma rewards
 
     # move towards opponents
-
+    if num_agents > 1:
+        pos = root_states[:, :, 0:2]   # [E, N, 2]
+        rel_pos = pos.unsqueeze(2) - pos.unsqueeze(1)    # [E, N, N, 2]
+        torso_vel = root_states[:, :, 7:9]     # [E, N, 2]
+        move_opp_reward = 0.1 * torch.sum(
+            (rel_pos / (torch.norm(rel_pos, dim=-1, keepdim=True) + 1e-6)) * torso_vel.unsqueeze(2), dim=[-1, -2]
+        )     # [E, N]
+    else:
+        move_opp_reward = torch.zeros_like(z_pos)
     # stay in center
-    torso_gnd_position = root_states[:, :, 0:2]
-    stay_center_reward = 0.5 * torch.exp(-torch.norm(torso_gnd_position, dim=-1))
+    # torso_gnd_position = root_states[:, :, 0:2]
+    # stay_center_reward = 1.0 * torch.exp(-torch.norm(torso_gnd_position, dim=-1))
 
         # + progress_reward \
         # + heading_reward \
@@ -720,7 +733,8 @@ def compute_ant_reward(
     total_reward = 0 \
         + alive_reward \
         + actions_cost \
-        + stay_center_reward \
+        + move_opp_reward \
+        # + stay_center_reward \
         # (-energy_cost_scale) * electricity_cost,
         # (-dof_at_limit_cost) * joints_at_limit_cost_scale,
 
@@ -832,8 +846,7 @@ def compute_ant_observations(
     if num_agents > 1:
         pos = torso_position.view(num_envs, num_agents, -1)   # [E, N, 3]
         dist = torch.cdist(pos, pos)    # [E, N, N]
-        pos_t = pos.permute(0, 2, 1).unsqueeze(-1)     # [E, 3, N, 1]
-        rel_pos = torch.cdist(pos_t, pos_t, p=1.).permute(0, 2, 3, 1)    # [E, N, N, 3]
+        rel_pos = pos.unsqueeze(2) - pos.unsqueeze(1)    # [E, N, N, 3]
         val, ind = torch.topk(dist, max_num_obs, largest=False)     # [E, N, M+1]
         ind = ind[:, :, 1:]     # [E, N, M]
         rel_obs = rel_pos[
