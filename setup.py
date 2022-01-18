@@ -18,7 +18,7 @@ INSTALL_REQUIRES = [
     "torch",
     "omegaconf",
     "hydra-core>=1.1",
-    "rl-games==1.1.3",
+    # "rl-games==1.1.3",
 ]
 
 # Installation operation

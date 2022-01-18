@@ -6,6 +6,7 @@ experiment: ''
 
 # if set to positive integer, overrides the default number of environments
 num_envs: ''
+# num_envs: 4
 
 # seed - set to -1 to choose random seed
 seed: 42
@@ -40,8 +41,8 @@ checkpoint: ''
 multi_gpu: False
 
 # disables rendering
-headless: False
-# headless: True
+# headless: False
+headless: True
 
 # set default task and default training config based on task
 defaults:

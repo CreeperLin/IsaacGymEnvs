@@ -730,6 +730,16 @@ def compute_ant_reward(
     # torso_gnd_position = root_states[:, :, 0:2]
     # stay_center_reward = 1.0 * torch.exp(-torch.norm(torso_gnd_position, dim=-1))
 
+    terminated = z_pos < termination_height
+
+    wt_reward = torch.where(terminated, torch.ones_like(z_pos) * death_cost, torch.zeros_like(z_pos))
+    wt_reward = torch.sum(wt_reward.view(num_envs, value_size, -1), dim=-1)
+
+    if reward_weight.shape[0] > 1:
+        wt_reward = wt_reward @ reward_weight
+
+    wt_reward = wt_reward.unsqueeze(-1)
+
         # + progress_reward \
         # + heading_reward \
         # + up_reward \
@@ -737,19 +747,17 @@ def compute_ant_reward(
         + alive_reward \
         + actions_cost \
         + move_opp_reward \
+        + wt_reward \
         # + stay_center_reward \
         # (-energy_cost_scale) * electricity_cost,
         # (-dof_at_limit_cost) * joints_at_limit_cost_scale,
 
     # adjust reward for fallen agents
-    terminated = z_pos < termination_height
     total_reward = torch.where(terminated, torch.ones_like(total_reward) * death_cost, total_reward)
 
     total_reward = torch.where(terminated_buf, torch.zeros_like(total_reward), total_reward)
     # print(total_reward.shape)
     total_reward = torch.sum(total_reward.view(num_envs, value_size, -1), dim=-1).squeeze()
-    if reward_weight.shape[0] > 1:
-        total_reward = total_reward @ reward_weight
 
     terminated = torch.logical_or(terminated, terminated_buf)
 
