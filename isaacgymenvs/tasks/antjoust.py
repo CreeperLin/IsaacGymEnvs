@@ -115,6 +115,7 @@ class AntJoust(VecTask):
         self.value_size_export = self.value_size // self.num_agents_export
 
         self._act_part_pt = 0
+        self.viewer = None
 
         super().__init__(
             config=self.cfg, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless
@@ -139,15 +140,14 @@ class AntJoust(VecTask):
 
         # get gym GPU state tensors
         actor_root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
-        print('actor_root_state', actor_root_state.shape)
+        print('actor_root_state', actor_root_state.shape)   # (n_envs * n_agents, 13)
         dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
-        print('dof state', dof_state_tensor.shape)
+        print('dof state', dof_state_tensor.shape)  # (n_envs * n_agents * 8, 2)
         sensor_tensor = self.gym.acquire_force_sensor_tensor(self.sim)
         net_contact = self.gym.acquire_net_contact_force_tensor(self.sim)
-        print('net_contact', net_contact.shape)
+        print('net_contact', net_contact.shape)     # (n_envs * n_agents * 9, 3)
         rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
-        print('rigid_body_state', rigid_body_state.shape)
-
+        print('rigid_body_state', rigid_body_state.shape)   # (n_envs * n_agents * 9, 13)
         # sensors_per_env = 4
         sensors_per_env = 4 * self.num_agents
         self.vec_sensor_tensor = gymtorch.wrap_tensor(sensor_tensor).view(self.num_envs, sensors_per_env * 6)
@@ -201,6 +201,10 @@ class AntJoust(VecTask):
         # self.potentials = to_torch([-1000./self.dt], device=self.device).repeat(self.num_envs)
         self.potentials = to_torch([-1000./self.dt], device=self.device).repeat(self.num_envs, self.num_agents)
         self.prev_potentials = self.potentials.clone()
+        # cam_pos = [15, 15, 150]
+        # cam_target = [1, 1, 1]
+        # self.gym.viewer_camera_look_at(self.viewer, self.envs[0], gymapi.Vec3(*cam_pos), gymapi.Vec3(*cam_target))
+        self.set_viewer()
 
     def allocate_buffers(self):
         """Allocate the observation, states, etc. buffers.
@@ -252,22 +256,20 @@ class AntJoust(VecTask):
 
         # todo: read from config
         self.enable_viewer_sync = True
-        self.viewer = None
 
-        # cam_pos = [20.0, 25.0, 3.0]
-        # cam_target = [10.0, 15.0, 0.0]
-        cam_pos = [0, 0, 15.0]
-        cam_target = [1.0, 1.5, 0.0]
+        cam_pos = [20.0, 25.0, 10.0]
+        cam_target = [10.0, 15.0, 0.0]
 
         # if running with a viewer, set up keyboard shortcuts and camera
-        if self.headless == False:
+        if self.headless is False:
             # subscribe to keyboard shortcuts
-            self.viewer = self.gym.create_viewer(
-                self.sim, gymapi.CameraProperties())
-            self.gym.subscribe_viewer_keyboard_event(
-                self.viewer, gymapi.KEY_ESCAPE, "QUIT")
-            self.gym.subscribe_viewer_keyboard_event(
-                self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
+            if self.viewer is None:
+                self.viewer = self.gym.create_viewer(
+                    self.sim, gymapi.CameraProperties())
+                self.gym.subscribe_viewer_keyboard_event(
+                    self.viewer, gymapi.KEY_ESCAPE, "QUIT")
+                self.gym.subscribe_viewer_keyboard_event(
+                    self.viewer, gymapi.KEY_V, "toggle_viewer_sync")
 
             # set the camera position based on up axis
             sim_params = self.gym.get_sim_params(self.sim)
@@ -275,8 +277,7 @@ class AntJoust(VecTask):
                 cam_pos = [cam_pos[0], cam_pos[2], cam_pos[1]]
                 cam_target = [cam_target[0], cam_target[2], cam_target[1]]
 
-            self.gym.viewer_camera_look_at(
-                self.viewer, None, gymapi.Vec3(*cam_pos), gymapi.Vec3(*cam_target))
+            self.gym.viewer_camera_look_at(self.viewer, self.envs[0], gymapi.Vec3(*cam_pos), gymapi.Vec3(*cam_target))
 
     def create_sim(self):
         self.up_axis_idx = self.set_sim_params_up_axis(self.sim_params, 'z')
@@ -719,7 +720,9 @@ def compute_ant_reward(
         rel_pos = pos.unsqueeze(2) - pos.unsqueeze(1)    # [E, N, N, 2]
         torso_vel = root_states[:, :, 7:9]     # [E, N, 2]
         move_opp_reward = 0.1 * torch.sum(
-            (rel_pos / (torch.norm(rel_pos, dim=-1, keepdim=True) + 1e-6)) * torso_vel.unsqueeze(2), dim=[-1, -2]
+            (rel_pos / (torch.norm(rel_pos, dim=-1, keepdim=True) + 1e-7))
+            * (torso_vel / (torch.norm(torso_vel, dim=-1, keepdim=True) + 1e-7)).unsqueeze(2),
+            dim=[-1, -2]
         )     # [E, N]
     else:
         move_opp_reward = torch.zeros_like(z_pos)
