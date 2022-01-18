@@ -30,17 +30,23 @@ from typing import Dict, Any, Tuple
 
 import math
 import numpy as np
-import os
 import torch
 from torch import Tensor
 import xml.etree.ElementTree as ET
 
 from isaacgym import gymutil, gymtorch, gymapi
-from utils.torch_jit_utils import *
-from .base.vec_task import VecTask
+from isaacgym.torch_utils import tensor_clamp, torch_rand_float, to_torch
+from utils.torch_jit_utils import quat_axis
+# from .base.vec_task import VecTask
+from .base.ma_vec_task import MultiAgentVecTask,\
+    reset_any_team_all_terminated, reset_max_episode_length,\
+    reward_sum_team,\
+    terminated_buf_update,\
+    start_pose_radian
 
 
-class QuadcopterJoust(VecTask):
+# class QuadcopterJoust(VecTask):
+class QuadcopterJoust(MultiAgentVecTask):
 
     def __init__(self, cfg, sim_device, graphics_device_id, headless):
         self.cfg = cfg
@@ -64,19 +70,19 @@ class QuadcopterJoust(VecTask):
         self.cfg["env"]["numObservations"] = num_obs
         self.cfg["env"]["numActions"] = num_acts
 
-        super().__init__(config=self.cfg, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless)
+        self.thrust_action_speed_scale = 200
+
+        super().__init__(
+            config=self.cfg, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless
+        )
 
         self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
         self.dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
 
-        vec_root_tensor = gymtorch.wrap_tensor(self.root_tensor).view(self.num_envs, 13)
-        vec_dof_tensor = gymtorch.wrap_tensor(self.dof_state_tensor).view(self.num_envs, dofs_per_env, 2)
+        vec_root_tensor = gymtorch.wrap_tensor(self.root_tensor).view(self.num_agts, 13)
+        vec_dof_tensor = gymtorch.wrap_tensor(self.dof_state_tensor).view(self.num_agts, dofs_per_env, 2)
 
         self.root_states = vec_root_tensor
-        self.root_positions = vec_root_tensor[..., 0:3]
-        self.root_quats = vec_root_tensor[..., 3:7]
-        self.root_linvels = vec_root_tensor[..., 7:10]
-        self.root_angvels = vec_root_tensor[..., 10:13]
 
         self.dof_states = vec_dof_tensor
         self.dof_positions = vec_dof_tensor[..., 0]
@@ -93,11 +99,11 @@ class QuadcopterJoust(VecTask):
         self.thrust_upper_limits = max_thrust * torch.ones(4, device=self.device, dtype=torch.float32)
 
         # control tensors
-        self.dof_position_targets = torch.zeros((self.num_envs, dofs_per_env), dtype=torch.float32, device=self.device, requires_grad=False)
-        self.thrusts = torch.zeros((self.num_envs, 4), dtype=torch.float32, device=self.device, requires_grad=False)
-        self.forces = torch.zeros((self.num_envs, bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
+        self.dof_position_targets = torch.zeros((self.num_agts, dofs_per_env), dtype=torch.float32, device=self.device, requires_grad=False)
+        self.thrusts = torch.zeros((self.num_agts, 4), dtype=torch.float32, device=self.device, requires_grad=False)
+        self.forces = torch.zeros((self.num_agts, bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
 
-        self.all_actor_indices = torch.arange(self.num_envs, dtype=torch.int32, device=self.device)
+        self.all_actor_indices = torch.arange(self.num_agts, dtype=torch.int32, device=self.device)
 
         if self.viewer:
             cam_pos = gymapi.Vec3(1.0, 1.0, 1.8)
@@ -106,7 +112,7 @@ class QuadcopterJoust(VecTask):
 
             # need rigid body states for visualizing thrusts
             self.rb_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
-            self.rb_states = gymtorch.wrap_tensor(self.rb_state_tensor).view(self.num_envs, bodies_per_env, 13)
+            self.rb_states = gymtorch.wrap_tensor(self.rb_state_tensor).view(self.num_agts, bodies_per_env, 13)
             self.rb_positions = self.rb_states[..., 0:3]
             self.rb_quats = self.rb_states[..., 3:7]
 
@@ -228,78 +234,91 @@ class QuadcopterJoust(VecTask):
         dof_props = self.gym.get_asset_dof_properties(asset)
         self.dof_lower_limits = []
         self.dof_upper_limits = []
-        for i in range(self.num_dofs):
-            self.dof_lower_limits.append(dof_props['lower'][i])
-            self.dof_upper_limits.append(dof_props['upper'][i])
+        # for _ in range(self.num_agents):
+        for _ in range(1):
+            for i in range(self.num_dofs):
+                self.dof_lower_limits.append(dof_props['lower'][i])
+                self.dof_upper_limits.append(dof_props['upper'][i])
 
         self.dof_lower_limits = to_torch(self.dof_lower_limits, device=self.device)
         self.dof_upper_limits = to_torch(self.dof_upper_limits, device=self.device)
         self.dof_ranges = self.dof_upper_limits - self.dof_lower_limits
 
-        default_pose = gymapi.Transform()
-        default_pose.p.z = 1.0
+        pos = start_pose_radian(
+            self.num_envs, self.num_agents, gymapi.UP_AXIS_Z, radius_coef=0.2, randomize_coef=0
+        )
 
         self.envs = []
         for i in range(self.num_envs):
             # create env instance
             env = self.gym.create_env(self.sim, lower, upper, num_per_row)
-            actor_handle = self.gym.create_actor(env, asset, default_pose, "quadcopter", i, 1, 0)
 
-            dof_props = self.gym.get_actor_dof_properties(env, actor_handle)
-            dof_props['driveMode'].fill(gymapi.DOF_MODE_POS)
-            dof_props['stiffness'].fill(1000.0)
-            dof_props['damping'].fill(0.0)
-            self.gym.set_actor_dof_properties(env, actor_handle, dof_props)
-
-            # pretty colors
-            chassis_color = gymapi.Vec3(0.8, 0.6, 0.2)
-            rotor_color = gymapi.Vec3(0.1, 0.2, 0.6)
-            arm_color = gymapi.Vec3(0.0, 0.0, 0.0)
-            self.gym.set_rigid_body_color(env, actor_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, chassis_color)
-            self.gym.set_rigid_body_color(env, actor_handle, 1, gymapi.MESH_VISUAL_AND_COLLISION, arm_color)
-            self.gym.set_rigid_body_color(env, actor_handle, 3, gymapi.MESH_VISUAL_AND_COLLISION, arm_color)
-            self.gym.set_rigid_body_color(env, actor_handle, 5, gymapi.MESH_VISUAL_AND_COLLISION, arm_color)
-            self.gym.set_rigid_body_color(env, actor_handle, 7, gymapi.MESH_VISUAL_AND_COLLISION, arm_color)
-            self.gym.set_rigid_body_color(env, actor_handle, 2, gymapi.MESH_VISUAL_AND_COLLISION, rotor_color)
-            self.gym.set_rigid_body_color(env, actor_handle, 4, gymapi.MESH_VISUAL_AND_COLLISION, rotor_color)
-            self.gym.set_rigid_body_color(env, actor_handle, 6, gymapi.MESH_VISUAL_AND_COLLISION, rotor_color)
-            self.gym.set_rigid_body_color(env, actor_handle, 8, gymapi.MESH_VISUAL_AND_COLLISION, rotor_color)
-            #self.gym.set_rigid_body_color(env, actor_handle, 2, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(1, 0, 0))
-            #self.gym.set_rigid_body_color(env, actor_handle, 4, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0, 1, 0))
-            #self.gym.set_rigid_body_color(env, actor_handle, 6, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0, 0, 1))
-            #self.gym.set_rigid_body_color(env, actor_handle, 8, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(1, 1, 0))
+            for k in range(self.num_agents):
+                pose = gymapi.Transform()
+                pose.p.z = 1.0
+                pose.p += gymapi.Vec3(*pos[i][k].tolist())
+                actor_handle = self.gym.create_actor(env, asset, pose, "quadcopter", i, 0, 0)
+                dof_props = self.gym.get_actor_dof_properties(env, actor_handle)
+                dof_props['driveMode'].fill(gymapi.DOF_MODE_POS)
+                dof_props['stiffness'].fill(1000.0)
+                dof_props['damping'].fill(0.0)
+                self.gym.set_actor_dof_properties(env, actor_handle, dof_props)
+                # pretty colors
+                team = self.get_team_id(k)
+                chassis_color = gymapi.Vec3(0.8, 0.6, 0.2) + self.team_colors[team]
+                rotor_color = gymapi.Vec3(0.1, 0.2, 0.6) + self.team_colors[team]
+                arm_color = gymapi.Vec3(0.0, 0.0, 0.0) + self.team_colors[team]
+                self.gym.set_rigid_body_color(env, actor_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, chassis_color)
+                self.gym.set_rigid_body_color(env, actor_handle, 1, gymapi.MESH_VISUAL_AND_COLLISION, arm_color)
+                self.gym.set_rigid_body_color(env, actor_handle, 3, gymapi.MESH_VISUAL_AND_COLLISION, arm_color)
+                self.gym.set_rigid_body_color(env, actor_handle, 5, gymapi.MESH_VISUAL_AND_COLLISION, arm_color)
+                self.gym.set_rigid_body_color(env, actor_handle, 7, gymapi.MESH_VISUAL_AND_COLLISION, arm_color)
+                self.gym.set_rigid_body_color(env, actor_handle, 2, gymapi.MESH_VISUAL_AND_COLLISION, rotor_color)
+                self.gym.set_rigid_body_color(env, actor_handle, 4, gymapi.MESH_VISUAL_AND_COLLISION, rotor_color)
+                self.gym.set_rigid_body_color(env, actor_handle, 6, gymapi.MESH_VISUAL_AND_COLLISION, rotor_color)
+                self.gym.set_rigid_body_color(env, actor_handle, 8, gymapi.MESH_VISUAL_AND_COLLISION, rotor_color)
+                #self.gym.set_rigid_body_color(env, actor_handle, 2, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(1, 0, 0))
+                #self.gym.set_rigid_body_color(env, actor_handle, 4, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0, 1, 0))
+                #self.gym.set_rigid_body_color(env, actor_handle, 6, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0, 0, 1))
+                #self.gym.set_rigid_body_color(env, actor_handle, 8, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(1, 1, 0))
 
             self.envs.append(env)
 
         if self.debug_viz:
             # need env offsets for the rotors
-            self.rotor_env_offsets = torch.zeros((self.num_envs, 4, 3), device=self.device)
-            for i in range(self.num_envs):
+            self.rotor_env_offsets = torch.zeros((self.num_agts, 4, 3), device=self.device)
+            for i in range(self.num_agts):
                 env_origin = self.gym.get_env_origin(self.envs[i])
                 self.rotor_env_offsets[i, ..., 0] = env_origin.x
                 self.rotor_env_offsets[i, ..., 1] = env_origin.y
                 self.rotor_env_offsets[i, ..., 2] = env_origin.z
 
     def reset_idx(self, env_ids):
+        super().reset_idx(env_ids)
 
-        num_resets = len(env_ids)
+        agt_ids = self.get_reset_agent_ids(env_ids)
+        num_resets = len(agt_ids)
 
-        self.dof_states[env_ids] = self.initial_dof_states[env_ids]
+        self.dof_states[agt_ids] = self.initial_dof_states[agt_ids]
 
-        actor_indices = self.all_actor_indices[env_ids].flatten()
+        actor_indices = self.all_actor_indices[agt_ids].flatten()
 
-        self.root_states[env_ids] = self.initial_root_states[env_ids]
-        self.root_states[env_ids, 0] += torch_rand_float(-1.5, 1.5, (num_resets, 1), self.device).flatten()
-        self.root_states[env_ids, 1] += torch_rand_float(-1.5, 1.5, (num_resets, 1), self.device).flatten()
-        self.root_states[env_ids, 2] += torch_rand_float(-0.2, 1.5, (num_resets, 1), self.device).flatten()
-        self.gym.set_actor_root_state_tensor_indexed(self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets)
+        self.root_states[agt_ids] = self.initial_root_states[agt_ids]
+        self.root_states[agt_ids, 0] += torch_rand_float(-1.5, 1.5, (num_resets, 1), self.device).flatten()
+        self.root_states[agt_ids, 1] += torch_rand_float(-1.5, 1.5, (num_resets, 1), self.device).flatten()
+        self.root_states[agt_ids, 2] += torch_rand_float(-0.2, 1.5, (num_resets, 1), self.device).flatten()
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets
+        )
 
-        self.dof_positions[env_ids] = torch_rand_float(-0.2, 0.2, (num_resets, 8), self.device)
-        self.dof_velocities[env_ids] = 0.0
-        self.gym.set_dof_state_tensor_indexed(self.sim, self.dof_state_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets)
+        self.dof_positions[agt_ids] = torch_rand_float(-0.2, 0.2, (num_resets, 8), self.device)
+        self.dof_velocities[agt_ids] = 0.0
+        self.gym.set_dof_state_tensor_indexed(
+            self.sim, self.dof_state_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets
+        )
 
-        self.reset_buf[env_ids] = 0
-        self.progress_buf[env_ids] = 0
+        # self.reset_buf[env_ids] = 0
+        # self.progress_buf[env_ids] = 0
 
     def pre_physics_step(self, _actions):
 
@@ -309,13 +328,16 @@ class QuadcopterJoust(VecTask):
             self.reset_idx(reset_env_ids)
 
         actions = _actions.to(self.device)
+        actions = actions.view(self.dof_position_targets.shape[0], -1)
+        actions = self.clear_terminated_actions(actions)
+        # print(actions.shape)
+        # print(self.dof_position_targets.shape)
 
         dof_action_speed_scale = 8 * math.pi
         self.dof_position_targets += self.dt * dof_action_speed_scale * actions[:, 0:8]
         self.dof_position_targets[:] = tensor_clamp(self.dof_position_targets, self.dof_lower_limits, self.dof_upper_limits)
 
-        thrust_action_speed_scale = 200
-        self.thrusts += self.dt * thrust_action_speed_scale * actions[:, 8:12]
+        self.thrusts += self.dt * self.thrust_action_speed_scale * actions[:, 8:12]
         self.thrusts[:] = tensor_clamp(self.thrusts, self.thrust_lower_limits, self.thrust_upper_limits)
 
         self.forces[:, 2, 2] = self.thrusts[:, 0]
@@ -334,7 +356,8 @@ class QuadcopterJoust(VecTask):
 
     def post_physics_step(self):
 
-        self.progress_buf += 1
+        # self.progress_buf += 1
+        self.update_progress()
 
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_dof_state_tensor(self.sim)
@@ -348,35 +371,39 @@ class QuadcopterJoust(VecTask):
             self.gym.refresh_rigid_body_state_tensor(self.sim)
             rotor_indices = torch.LongTensor([2, 4, 6, 8])
             quats = self.rb_quats[:, rotor_indices]
-            dirs = -quat_axis(quats.view(self.num_envs * 4, 4), 2).view(self.num_envs, 4, 3)
+            dirs = -quat_axis(quats.view(self.num_agts * 4, 4), 2).view(self.num_agts, 4, 3)
             starts = self.rb_positions[:, rotor_indices] + self.rotor_env_offsets
-            ends = starts + 0.1 * self.thrusts.view(self.num_envs, 4, 1) * dirs
+            ends = starts + 0.1 * self.thrusts.view(self.num_agts, 4, 1) * dirs
 
             # submit debug line geometry
             verts = torch.stack([starts, ends], dim=2).cpu().numpy()
-            colors = np.zeros((self.num_envs * 4, 3), dtype=np.float32)
+            colors = np.zeros((self.num_agts * 4, 3), dtype=np.float32)
             colors[..., 0] = 1.0
             self.gym.clear_lines(self.viewer)
-            self.gym.add_lines(self.viewer, None, self.num_envs * 4, verts, colors)
+            self.gym.add_lines(self.viewer, None, self.num_agts * 4, verts, colors)
 
     def compute_observations(self):
         self.obs_buf[:] = compute_quadcopter_observations(
             self.obs_buf,
-            self.root_positions,
-            self.root_quats,
-            self.root_linvels,
-            self.root_angvels,
+            self.root_states,
             self.dof_positions,
+            self.terminated_buf,
+            self.num_envs,
+            self.num_agents,
         )
         return self.obs_buf
 
     def compute_reward(self):
-        self.rew_buf[:], self.reset_buf[:] = compute_quadcopter_reward(
-            self.root_positions,
-            self.root_quats,
-            self.root_linvels,
-            self.root_angvels,
-            self.reset_buf, self.progress_buf, self.max_episode_length
+        self.rew_buf[:], self.reset_buf[:], self.terminated_buf[:] = compute_quadcopter_reward(
+            self.root_states,
+            self.reset_buf,
+            self.terminated_buf,
+            self.progress_buf,
+            self.reward_weight,
+            self.max_episode_length,
+            self.num_envs,
+            self.num_agents,
+            self.value_size
         )
 
 
@@ -387,15 +414,19 @@ class QuadcopterJoust(VecTask):
 @torch.jit.script
 def compute_quadcopter_observations(
     obs_buf: Tensor,
-    root_positions: Tensor,
-    root_quats: Tensor,
-    root_linvels: Tensor,
-    root_angvels: Tensor,
+    root_states: Tensor,
     dof_positions: Tensor,
+    terminated_buf: Tensor,
+    num_envs: int,
+    num_agents: int,
 ) -> Tensor:
     target_x = 0.0
     target_y = 0.0
     target_z = 1.0
+    root_positions = root_states[..., 0:3]
+    root_quats = root_states[..., 3:7]
+    root_linvels = root_states[..., 7:10]
+    root_angvels = root_states[..., 10:13]
     obs_buf = torch.zeros_like(obs_buf)
     obs_buf[..., 0] = (target_x - root_positions[..., 0]) / 3
     obs_buf[..., 1] = (target_y - root_positions[..., 1]) / 3
@@ -404,20 +435,28 @@ def compute_quadcopter_observations(
     obs_buf[..., 7:10] = root_linvels / 2
     obs_buf[..., 10:13] = root_angvels / math.pi
     obs_buf[..., 13:21] = dof_positions
+
+    obs_buf[terminated_buf.flatten(), :] = 0
+
     return obs_buf
 
 
 @torch.jit.script
 def compute_quadcopter_reward(
-    root_positions: Tensor,
-    root_quats: Tensor,
-    root_linvels: Tensor,
-    root_angvels: Tensor,
+    root_states: Tensor,
     reset_buf: Tensor,
+    terminated_buf: Tensor,
     progress_buf: Tensor,
-    max_episode_length: float,
-) -> Tuple[Tensor, Tensor]:
-
+    reward_weight: Tensor,
+    max_episode_length: int,
+    num_envs: int,
+    num_agents: int,
+    value_size: int,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    root_positions = root_states[..., 0:3]
+    z_pos = root_states[..., 2]
+    root_quats = root_states[..., 3:7]
+    root_angvels = root_states[..., 10:13]
     # distance to target
     target_dist = torch.sqrt(root_positions[..., 0] * root_positions[..., 0] +
                              root_positions[..., 1] * root_positions[..., 1] +
@@ -433,17 +472,32 @@ def compute_quadcopter_reward(
     spinnage = torch.abs(root_angvels[..., 2])
     spinnage_reward = 1.0 / (1.0 + spinnage * spinnage)
 
+    alive_reward = torch.ones_like(z_pos) * 0.5
+
     # combined reward
     # uprigness and spinning only matter when close to the target
-    reward = pos_reward + pos_reward * (up_reward + spinnage_reward)
+        # + alive_reward \
+    reward = 0 \
+        + pos_reward \
+        + pos_reward * (up_reward + spinnage_reward)
 
     # resets due to misbehavior
-    ones = torch.ones_like(reset_buf)
-    die = torch.zeros_like(reset_buf)
+    ones = torch.ones_like(target_dist, dtype=torch.bool)
+    die = torch.zeros_like(target_dist, dtype=torch.bool)
     die = torch.where(target_dist > 3.0, ones, die)
     die = torch.where(root_positions[..., 2] < 0.3, ones, die)
 
-    # resets due to episode length
-    reset = torch.where(progress_buf >= max_episode_length - 1, ones, die)
+    reward = torch.where(die, torch.ones_like(reward) * (-2.0), reward)
 
-    return reward, reset
+    reward = torch.where(terminated_buf.flatten(), torch.zeros_like(reward), reward)
+
+    reward = reward_sum_team(reward, num_envs, value_size)
+
+    reset = reset_any_team_all_terminated(reset_buf, die, num_envs, value_size)
+    # resets due to episode length
+    # reset = torch.where(progress_buf >= max_episode_length - 1, ones, die)
+    reset = reset_max_episode_length(reset, progress_buf, num_envs, max_episode_length)
+
+    terminated_buf = terminated_buf_update(terminated_buf, die, num_envs)
+
+    return reward, reset, terminated_buf

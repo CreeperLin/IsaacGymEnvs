@@ -39,8 +39,8 @@ from tasks.ingenuity import Ingenuity
 from tasks.quadcopter import Quadcopter
 from tasks.shadow_hand import ShadowHand
 from isaacgymenvs.tasks.trifinger import Trifinger
-from tasks.antjoust import AntJoust
-from tasks.quadcopterjoust import QuadcopterJoust
+from isaacgymenvs.tasks.antjoust import AntJoust
+from isaacgymenvs.tasks.quadcopterjoust import QuadcopterJoust
 
 
 # Mappings from strings to environments

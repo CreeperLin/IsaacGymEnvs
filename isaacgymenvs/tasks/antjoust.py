@@ -126,15 +126,13 @@ class AntJoust(VecTask):
             reward_weight *= (-1 / (value_size-1))
             reward_weight[[torch.arange(0, value_size)] * 2] = 1.
         self.reward_weight = reward_weight
-        # self.actions = torch.zeros((self.num_envs * self.num_agents_export, self.num_actions),
-        #                            device=self.device, dtype=torch.float)
         self.terminated_buf = torch.zeros((self.num_envs, self.num_agents), device=self.device, dtype=torch.bool)
 
         print('dof', self.num_dof)
         print('dof limit', self.dof_limits_lower)
         # self.num_dof = self.num_dof * self.num_agents
         if self.viewer is not None:
-            cam_pos = gymapi.Vec3(50.0, 25.0, 2.4)
+            cam_pos = gymapi.Vec3(50.0, 25.0, 4)
             cam_target = gymapi.Vec3(45.0, 25.0, 0.0)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
@@ -204,7 +202,7 @@ class AntJoust(VecTask):
         # cam_pos = [15, 15, 150]
         # cam_target = [1, 1, 1]
         # self.gym.viewer_camera_look_at(self.viewer, self.envs[0], gymapi.Vec3(*cam_pos), gymapi.Vec3(*cam_target))
-        self.set_viewer()
+        # self.set_viewer()
 
     def allocate_buffers(self):
         """Allocate the observation, states, etc. buffers.
