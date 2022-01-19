@@ -712,6 +712,8 @@ def compute_ant_reward(
 
     # ma rewards
 
+    terminated = z_pos < termination_height
+
     # move towards opponents
     if num_agents > 1:
         pos = root_states[:, :, 0:2]   # [E, N, 2]
@@ -722,13 +724,20 @@ def compute_ant_reward(
             * (torso_vel / (torch.norm(torso_vel, dim=-1, keepdim=True) + 1e-7)).unsqueeze(2),
             dim=[-1, -2]
         )     # [E, N]
+        dist = torch.cdist(pos, pos)    # [E, N, N]
+        val, ind = [r[:, :, 1] for r in torch.topk(dist, 2, largest=False)]     # [E, N]
+        terminated = torch.where(
+            torch.logical_and(
+                val < 0.25,
+                z_pos < z_pos[torch.arange(0, num_envs).view(num_envs, 1), ind]
+            ),
+            torch.ones_like(z_pos), terminated
+        )
     else:
         move_opp_reward = torch.zeros_like(z_pos)
     # stay in center
     # torso_gnd_position = root_states[:, :, 0:2]
     # stay_center_reward = 1.0 * torch.exp(-torch.norm(torso_gnd_position, dim=-1))
-
-    terminated = z_pos < termination_height
 
     wt_reward = torch.where(terminated, torch.ones_like(z_pos) * death_cost, torch.zeros_like(z_pos))
     wt_reward = torch.sum(wt_reward.view(num_envs, value_size, -1), dim=-1)

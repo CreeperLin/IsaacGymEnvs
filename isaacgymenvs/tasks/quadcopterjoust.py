@@ -55,7 +55,7 @@ class QuadcopterJoust(MultiAgentVecTask):
         self.debug_viz = self.cfg["env"]["enableDebugVis"]
 
         dofs_per_env = 8
-        bodies_per_env = 9
+        boterminateds_per_env = 9
 
         # Observations:
         # 0:13 - root state
@@ -70,7 +70,7 @@ class QuadcopterJoust(MultiAgentVecTask):
         self.cfg["env"]["numObservations"] = num_obs
         self.cfg["env"]["numActions"] = num_acts
 
-        self.thrust_action_speed_scale = 200
+        self.thrust_action_speed_scale = 400
 
         super().__init__(
             config=self.cfg, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless
@@ -101,18 +101,18 @@ class QuadcopterJoust(MultiAgentVecTask):
         # control tensors
         self.dof_position_targets = torch.zeros((self.num_agts, dofs_per_env), dtype=torch.float32, device=self.device, requires_grad=False)
         self.thrusts = torch.zeros((self.num_agts, 4), dtype=torch.float32, device=self.device, requires_grad=False)
-        self.forces = torch.zeros((self.num_agts, bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
+        self.forces = torch.zeros((self.num_agts, boterminateds_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
 
         self.all_actor_indices = torch.arange(self.num_agts, dtype=torch.int32, device=self.device)
 
         if self.viewer:
-            cam_pos = gymapi.Vec3(1.0, 1.0, 1.8)
+            cam_pos = gymapi.Vec3(1.0, 1.0, 2.5)
             cam_target = gymapi.Vec3(2.2, 2.0, 1.0)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
             # need rigid body states for visualizing thrusts
             self.rb_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
-            self.rb_states = gymtorch.wrap_tensor(self.rb_state_tensor).view(self.num_agts, bodies_per_env, 13)
+            self.rb_states = gymtorch.wrap_tensor(self.rb_state_tensor).view(self.num_agts, boterminateds_per_env, 13)
             self.rb_positions = self.rb_states[..., 0:3]
             self.rb_quats = self.rb_states[..., 3:7]
 
@@ -130,7 +130,7 @@ class QuadcopterJoust(MultiAgentVecTask):
     def _create_quadcopter_asset(self):
 
         chassis_radius = 0.1
-        chassis_thickness = 0.03
+        chassis_thickness = 0.1
         rotor_radius = 0.04
         rotor_thickness = 0.01
         rotor_arm_radius = 0.01
@@ -147,8 +147,10 @@ class QuadcopterJoust(MultiAgentVecTask):
         chassis.attrib["name"] = "chassis"
         chassis.attrib["pos"] = "%g %g %g" % (0, 0, 0)
         chassis_geom = ET.SubElement(chassis, "geom")
-        chassis_geom.attrib["type"] = "cylinder"
-        chassis_geom.attrib["size"] = "%g %g" % (chassis_radius, 0.5 * chassis_thickness)
+        # chassis_geom.attrib["type"] = "cylinder"
+        # chassis_geom.attrib["size"] = "%g %g" % (chassis_radius, 0.5 * chassis_thickness)
+        chassis_geom.attrib["type"] = "sphere"
+        chassis_geom.attrib["size"] = "%g" % (chassis_radius)
         chassis_geom.attrib["pos"] = "0 0 0"
         chassis_geom.attrib["density"] = "50"
         chassis_joint = ET.SubElement(chassis, "joint")
@@ -248,7 +250,6 @@ class QuadcopterJoust(MultiAgentVecTask):
             self.num_envs, self.num_agents, gymapi.UP_AXIS_Z, radius_coef=0.2, randomize_coef=0
         )
 
-        self.envs = []
         for i in range(self.num_envs):
             # create env instance
             env = self.gym.create_env(self.sim, lower, upper, num_per_row)
@@ -281,21 +282,21 @@ class QuadcopterJoust(MultiAgentVecTask):
                 #self.gym.set_rigid_body_color(env, actor_handle, 4, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0, 1, 0))
                 #self.gym.set_rigid_body_color(env, actor_handle, 6, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0, 0, 1))
                 #self.gym.set_rigid_body_color(env, actor_handle, 8, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(1, 1, 0))
+                self.add_actor(actor_handle)
 
-            self.envs.append(env)
+            self.add_env(env)
 
         if self.debug_viz:
             # need env offsets for the rotors
             self.rotor_env_offsets = torch.zeros((self.num_agts, 4, 3), device=self.device)
-            for i in range(self.num_agts):
-                env_origin = self.gym.get_env_origin(self.envs[i])
-                self.rotor_env_offsets[i, ..., 0] = env_origin.x
-                self.rotor_env_offsets[i, ..., 1] = env_origin.y
-                self.rotor_env_offsets[i, ..., 2] = env_origin.z
+            for i in range(self.num_envs):
+                env_origin = self.gym.get_env_origin(self.env_handles[i])
+                for k in range(self.num_agents):
+                    self.rotor_env_offsets[i*self.num_agents+k, ..., 0] = env_origin.x
+                    self.rotor_env_offsets[i*self.num_agents+k, ..., 1] = env_origin.y
+                    self.rotor_env_offsets[i*self.num_agents+k, ..., 2] = env_origin.z
 
     def reset_idx(self, env_ids):
-        super().reset_idx(env_ids)
-
         agt_ids = self.get_reset_agent_ids(env_ids)
         num_resets = len(agt_ids)
 
@@ -317,8 +318,7 @@ class QuadcopterJoust(MultiAgentVecTask):
             self.sim, self.dof_state_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets
         )
 
-        # self.reset_buf[env_ids] = 0
-        # self.progress_buf[env_ids] = 0
+        super().reset_idx(env_ids)
 
     def pre_physics_step(self, _actions):
 
@@ -327,11 +327,11 @@ class QuadcopterJoust(MultiAgentVecTask):
         if len(reset_env_ids) > 0:
             self.reset_idx(reset_env_ids)
 
+        self.terminate_agents()
+
         actions = _actions.to(self.device)
         actions = actions.view(self.dof_position_targets.shape[0], -1)
         actions = self.clear_terminated_actions(actions)
-        # print(actions.shape)
-        # print(self.dof_position_targets.shape)
 
         dof_action_speed_scale = 8 * math.pi
         self.dof_position_targets += self.dt * dof_action_speed_scale * actions[:, 0:8]
@@ -483,21 +483,35 @@ def compute_quadcopter_reward(
 
     # resets due to misbehavior
     ones = torch.ones_like(target_dist, dtype=torch.bool)
-    die = torch.zeros_like(target_dist, dtype=torch.bool)
-    die = torch.where(target_dist > 3.0, ones, die)
-    die = torch.where(root_positions[..., 2] < 0.3, ones, die)
+    terminated = torch.zeros_like(target_dist, dtype=torch.bool)
+    terminated = torch.where(target_dist > 3.0, ones, terminated)
+    terminated = torch.where(root_positions[..., 2] < 0.3, ones, terminated)
 
-    reward = torch.where(die, torch.ones_like(reward) * (-2.0), reward)
+    if num_agents > 1:
+        pos = root_positions.view(num_envs, num_agents, -1)
+        z_pos = z_pos.view(num_envs, num_agents)
+        dist = torch.cdist(pos, pos)    # [E, N, N]
+        val, ind = [r[:, :, 1] for r in torch.topk(dist, 2, largest=False)]     # [E, N]
+        proxm = val < 0.25
+        tgt_z_pos = z_pos[torch.arange(0, num_envs).view(num_envs, 1), ind]
+        jousted = torch.logical_and(proxm, z_pos < tgt_z_pos).flatten()
+        jouster = torch.logical_and(proxm, z_pos > tgt_z_pos).flatten()
+        terminated = torch.where(jousted, ones, terminated)
+        joust_score = 2.0
+        reward[jousted] -= joust_score
+        reward[jouster] += joust_score
+
+    reward = torch.where(terminated, torch.ones_like(reward) * (-2.0), reward)
 
     reward = torch.where(terminated_buf.flatten(), torch.zeros_like(reward), reward)
 
     reward = reward_sum_team(reward, num_envs, value_size)
 
-    reset = reset_any_team_all_terminated(reset_buf, die, num_envs, value_size)
+    reset = reset_any_team_all_terminated(reset_buf, terminated, num_envs, value_size)
     # resets due to episode length
-    # reset = torch.where(progress_buf >= max_episode_length - 1, ones, die)
+    # reset = torch.where(progress_buf >= max_episode_length - 1, ones, terminated)
     reset = reset_max_episode_length(reset, progress_buf, num_envs, max_episode_length)
 
-    terminated_buf = terminated_buf_update(terminated_buf, die, num_envs)
+    terminated_buf = terminated_buf_update(terminated_buf, terminated, num_envs)
 
     return reward, reset, terminated_buf
