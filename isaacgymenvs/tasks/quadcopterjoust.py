@@ -76,23 +76,14 @@ class QuadcopterJoust(MultiAgentVecTask):
             config=self.cfg, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless
         )
 
-        self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
-        self.dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
-
-        vec_root_tensor = gymtorch.wrap_tensor(self.root_tensor).view(self.num_agts, 13)
-        vec_dof_tensor = gymtorch.wrap_tensor(self.dof_state_tensor).view(self.num_agts, dofs_per_env, 2)
-
-        self.root_states = vec_root_tensor
-
-        self.dof_states = vec_dof_tensor
-        self.dof_positions = vec_dof_tensor[..., 0]
-        self.dof_velocities = vec_dof_tensor[..., 1]
+        self.dof_positions = self.dof_states[..., 0]
+        self.dof_velocities = self.dof_states[..., 1]
 
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_dof_state_tensor(self.sim)
 
-        self.initial_root_states = vec_root_tensor.clone()
-        self.initial_dof_states = vec_dof_tensor.clone()
+        self.initial_root_states = self.root_states.clone()
+        self.initial_dof_states = self.dof_states.clone()
 
         max_thrust = 2
         self.thrust_lower_limits = torch.zeros(4, device=self.device, dtype=torch.float32)
@@ -247,7 +238,7 @@ class QuadcopterJoust(MultiAgentVecTask):
         self.dof_ranges = self.dof_upper_limits - self.dof_lower_limits
 
         pos = start_pose_radian(
-            self.num_envs, self.num_agents, gymapi.UP_AXIS_Z, radius_coef=0.2, randomize_coef=0
+            self.num_envs, self.num_agents, gymapi.UP_AXIS_Z, radius_coef=0.3, randomize_coef=0
         )
 
         for i in range(self.num_envs):
@@ -309,7 +300,7 @@ class QuadcopterJoust(MultiAgentVecTask):
         self.root_states[agt_ids, 1] += torch_rand_float(-1.5, 1.5, (num_resets, 1), self.device).flatten()
         self.root_states[agt_ids, 2] += torch_rand_float(-0.2, 1.5, (num_resets, 1), self.device).flatten()
         self.gym.set_actor_root_state_tensor_indexed(
-            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets
+            self.sim, self.root_state_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets
         )
 
         self.dof_positions[agt_ids] = torch_rand_float(-0.2, 0.2, (num_resets, 8), self.device)
@@ -484,7 +475,7 @@ def compute_quadcopter_reward(
     # resets due to misbehavior
     ones = torch.ones_like(target_dist, dtype=torch.bool)
     terminated = torch.zeros_like(target_dist, dtype=torch.bool)
-    terminated = torch.where(target_dist > 3.0, ones, terminated)
+    terminated = torch.where(target_dist > 4.0, ones, terminated)
     terminated = torch.where(root_positions[..., 2] < 0.3, ones, terminated)
 
     if num_agents > 1:

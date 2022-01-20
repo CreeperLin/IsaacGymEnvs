@@ -132,6 +132,11 @@ class MultiAgentVecTask(VecTask):
             config=config, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless
         )
 
+        self.root_state_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
+        self.dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
+        self.root_states = gymtorch.wrap_tensor(self.root_state_tensor).view(self.num_agts, -1)
+        self.dof_states = gymtorch.wrap_tensor(self.dof_state_tensor).view(self.num_agts, -1, 2)
+
         reward_weight = torch.ones((value_size, value_size), device=self.device, dtype=torch.float)
         if zero_sum and value_size > 1:
             reward_weight *= (-1 / (value_size-1))
@@ -139,13 +144,26 @@ class MultiAgentVecTask(VecTask):
         self.reward_weight = reward_weight
         self.terminated_buf = torch.zeros((self.num_envs, self.num_agents), device=self.device, dtype=torch.bool)
 
-        save_replay_steps = config["env"].get("saveReplaySteps", 0)
-        self.save_replay = save_replay_steps > 0
+        save_replay_episodes = config["env"].get("saveReplayEpisodes", 0)
+        self.save_replay_path = config["env"].get("saveReplayPath", "./replay.pt")
+        self.save_replay = save_replay_episodes > 0
+        self.save_replay_episodes = save_replay_episodes
+        self.replay_mode = False
         if self.save_replay:
-            self.replay_pt = -1
+            self.replay_episode_pt = -1
+            self.replay_action_pt = -1
             self.replay_device = 'cpu'
             self.replay_actions = torch.zeros(
-                (save_replay_steps, self.self.num_envs, self.num_agents), device=self.replay_device, dtype=torch.float
+                (save_replay_episodes, self.max_episode_length, self.num_agents_export, self.num_actions),
+                device=self.replay_device, dtype=torch.float
+            )
+            self.replay_root_states = torch.zeros(
+                (save_replay_episodes, self.num_agents, 13),
+                device=self.replay_device, dtype=torch.float
+            )
+            self.replay_dof_states = torch.zeros(
+                (save_replay_episodes, self.num_agents, self.dof_states.shape[1], 2),
+                device=self.replay_device, dtype=torch.float
             )
 
     def add_actor(self, actor_handle):
@@ -213,6 +231,27 @@ class MultiAgentVecTask(VecTask):
         return ent_ids.flatten().to(dtype=torch.long)
 
     def reset_idx(self, env_ids):
+        if self.replay_mode:
+            self.replay_episode_pt += 1
+            print('load', self.replay_episode_pt, self.replay_action_pt)
+            self.root_states[:self.num_agents] = self.replay_root_states[self.replay_episode_pt].to(self.device)
+            self.dof_states[:self.num_agents] = self.replay_dof_states[self.replay_episode_pt].to(self.device)
+            self.gym.set_actor_root_state_tensor(self.sim, self.root_state_tensor)
+            self.gym.set_dof_state_tensor(self.sim, self.dof_state_tensor)
+            self.replay_action_pt = -1
+            if self.replay_episode_pt >= len(self.replay_root_states) - 1:
+                self.replay_mode = False
+        elif self.save_replay and 0 in env_ids:
+            self.replay_episode_pt += 1
+            print('save', self.replay_episode_pt, self.replay_action_pt)
+            root_states = self.root_states[:self.num_agents].to(self.replay_device)
+            dof_states = self.dof_states[:self.num_agents].to(self.replay_device)
+            self.replay_root_states[self.replay_episode_pt] = root_states
+            self.replay_dof_states[self.replay_episode_pt] = dof_states
+            self.replay_action_pt = -1
+            if self.replay_episode_pt >= self.save_replay_episodes - 1:
+                self.save_replay_state_dict(self.save_replay_path)
+                self.save_replay = False
         self.progress_buf.view(self.num_envs, -1)[env_ids] = 0
         self.reset_buf.view(self.num_envs, -1)[env_ids] = 0
         self.terminated_buf.view(self.num_envs, -1)[env_ids] = 0
@@ -223,9 +262,13 @@ class MultiAgentVecTask(VecTask):
             .to(self.rl_device)
 
     def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
-        if self.save_replay:
-            self.replay_pt += 1
-            self.replay_actions[self.replay_pt] = actions.to(self.replay_device, non_blocking=True)
+        if self.replay_mode:
+            self.replay_action_pt += 1
+            actions = self.replay_actions[self.replay_episode_pt][self.replay_action_pt]
+        elif self.save_replay:
+            self.replay_action_pt += 1
+            replay_actions = actions[:self.num_agents_export].to(self.replay_device)
+            self.replay_actions[self.replay_episode_pt][self.replay_action_pt] = replay_actions
         obs_dict, rew_buf, reset_buf, extras = super().step(actions)
         if self.num_agents_export > 1:
             obs_dict['obs'] = obs_dict['obs'].view(self.num_envs * self.num_agents_export, self.num_obs)
@@ -317,3 +360,33 @@ class MultiAgentVecTask(VecTask):
 
             else:
                 self.gym.poll_viewer_events(self.viewer)
+
+    def save_replay_state_dict(self, path):
+        if not self.save_replay:
+            return
+        replay_state_dict = {
+            'actions': self.replay_actions,
+            'root_states': self.replay_root_states,
+            'dof_states': self.replay_dof_states,
+        }
+        torch.save(replay_state_dict, path)
+        print('Replay saved', path)
+
+    def load_replay_state_dict(self, path):
+        sd = torch.load(path)
+        self.replay_actions = sd['actions'].to(self.device)
+        self.replay_root_states = sd['root_states'].to(self.device)
+        self.replay_dof_states = sd['dof_states'].to(self.device)
+
+    def replay(self):
+        self.replay_episode_pt = -1
+        self.replay_action_pt = -1
+        self.replay_mode = True
+        self.save_replay = False
+        self.reset()
+        while True:
+            if self.replay_mode is False:
+                break
+            if self.replay_episode_pt >= len(self.replay_root_states):
+                break
+            obs_dict, rew_buf, reset_buf, extras = self.step(None)
