@@ -244,6 +244,7 @@ class QuadcopterJoust(MultiAgentVecTask):
         for i in range(self.num_envs):
             # create env instance
             env = self.gym.create_env(self.sim, lower, upper, num_per_row)
+            self.add_env(env)
 
             for k in range(self.num_agents):
                 pose = gymapi.Transform()
@@ -274,8 +275,6 @@ class QuadcopterJoust(MultiAgentVecTask):
                 #self.gym.set_rigid_body_color(env, actor_handle, 6, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(0, 0, 1))
                 #self.gym.set_rigid_body_color(env, actor_handle, 8, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(1, 1, 0))
                 self.add_actor(actor_handle)
-
-            self.add_env(env)
 
         if self.debug_viz:
             # need env offsets for the rotors
@@ -485,8 +484,8 @@ def compute_quadcopter_reward(
         val, ind = [r[:, :, 1] for r in torch.topk(dist, 2, largest=False)]     # [E, N]
         proxm = val < 0.25
         tgt_z_pos = z_pos[torch.arange(0, num_envs).view(num_envs, 1), ind]
-        jousted = torch.logical_and(proxm, z_pos < tgt_z_pos).flatten()
-        jouster = torch.logical_and(proxm, z_pos > tgt_z_pos).flatten()
+        jousted = torch.logical_and(proxm, tgt_z_pos - z_pos > 0.1).flatten()
+        jouster = torch.logical_and(proxm, z_pos - tgt_z_pos > 0.1).flatten()
         terminated = torch.where(jousted, ones, terminated)
         joust_score = 2.0
         reward[jousted] -= joust_score

@@ -1,6 +1,7 @@
 from typing import Dict, Any, Tuple
 import sys
 import math
+import random
 from isaacgym import gymtorch
 from isaacgym import gymapi
 import torch
@@ -167,10 +168,17 @@ class MultiAgentVecTask(VecTask):
             )
 
     def add_actor(self, actor_handle):
-        self.actor_handles.append(actor_handle)
+        self.actor_handles[-1].append(actor_handle)
 
     def add_env(self, env_handle):
         self.env_handles.append(env_handle)
+        self.actor_handles.append([])
+
+    def get_actor(self, env_id, actor_id):
+        return self.actor_handles[env_id][actor_id]
+
+    def get_env(self, env_id):
+        return self.env_handles[env_id]
 
     def allocate_buffers(self):
         """Allocate the observation, states, etc. buffers.
@@ -282,11 +290,19 @@ class MultiAgentVecTask(VecTask):
         ] += 1
 
     def clear_terminated_actions(self, actions):
-        actions.view(self.num_envs, self.num_agents, -1)[self.terminated_buf] = 0
+        actions.view(self.num_envs * self.num_agents, -1)[self.terminated_buf.flatten()] = 0
         return actions
 
     def terminate_agents(self):
-        pass
+        if not self.viewer or not self.debug_viz:
+            return
+        for env_id, actor_id in torch.nonzero(self.terminated_buf, as_tuple=False).tolist():
+            team = self.get_team_id(actor_id)
+            chassis_color = gymapi.Vec3(*[random.random() for _ in range(3)]) + self.team_colors[team]
+            self.gym.set_rigid_body_color(
+                self.get_env(env_id), self.get_actor(env_id, actor_id),
+                0, gymapi.MESH_VISUAL_AND_COLLISION, chassis_color
+            )
 
     def reset(self) -> torch.Tensor:
         """Reset the environment.
