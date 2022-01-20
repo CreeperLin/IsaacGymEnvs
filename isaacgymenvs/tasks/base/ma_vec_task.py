@@ -10,7 +10,7 @@ from torch import Tensor
 
 
 @torch.jit.script
-def obs_nearest_neighbors(
+def obs_all_nearest_neighbors(
     pos: Tensor,
     num_envs: int,
     num_agents: int,
@@ -18,9 +18,45 @@ def obs_nearest_neighbors(
 ) -> Tensor:
     pos = pos.view(num_envs, num_agents, -1)   # [E, N, 3]
     dist = torch.cdist(pos, pos)    # [E, N, N]
-    _, ind = torch.topk(dist, max_num_obs, largest=False)     # [E, N, M+1]
+    _, ind = torch.topk(dist, max_num_obs + 1, largest=False)     # [E, N, M+1]
     ind = ind[:, :, 1:]     # [E, N, M]
     return ind
+
+
+@torch.jit.script
+def obs_get_by_env_index(
+    obs: Tensor,
+    ind: Tensor,
+    num_envs: int,
+    num_agents: int,
+) -> Tensor:
+    return obs.view(num_envs, num_agents, -1)[
+        torch.arange(0, num_envs).view(num_envs, 1, 1), ind
+    ]   # [E, N, M, S]
+
+
+@torch.jit.script
+def obs_rel_pos_by_env_index(
+    pos: Tensor,
+    ind: Tensor,
+    num_envs: int,
+    num_agents: int,
+) -> Tensor:
+    epos = pos.view(num_envs, num_agents, -1)   # [E, N, 3]
+    rel_pos = epos.unsqueeze(2) - epos.unsqueeze(1)    # [E, N, N, 3]
+    return rel_pos[
+        torch.arange(0, num_envs).view(num_envs, 1, 1), torch.arange(0, num_agents).view(1, num_agents, 1), ind
+    ]   # [E, N, M, 3]
+
+
+@torch.jit.script
+def obs_same_team_index(
+    ind: Tensor,
+    num_envs: int,
+    num_agents: int,
+    num_teams: int
+) -> Tensor:
+    return ind // num_teams
 
 
 @torch.jit.script
@@ -29,7 +65,7 @@ def reset_any_team_all_terminated(
     terminated: Tensor,
     num_envs: int,
     value_size: int,
-):
+) -> Tensor:
     reset_ones = torch.ones_like(reset)
     return torch.where(
         torch.any(torch.all(terminated.view(num_envs, value_size, -1), dim=-1), dim=-1), reset_ones, reset
@@ -42,7 +78,7 @@ def reset_max_episode_length(
     progress_buf: Tensor,
     num_envs: int,
     max_episode_length: int,
-):
+) -> Tensor:
     reset_ones = torch.ones_like(reset)
     return torch.where(
         torch.all(progress_buf.view(num_envs, -1) >= max_episode_length - 1, dim=-1), reset_ones, reset
@@ -50,11 +86,21 @@ def reset_max_episode_length(
 
 
 @torch.jit.script
+def reward_reweight_team(
+    reward: Tensor,
+    reward_weight: Tensor,
+) -> Tensor:
+    if reward_weight.shape[0] > 1:
+        reward = reward @ reward_weight
+    return reward
+
+
+@torch.jit.script
 def reward_sum_team(
     reward: Tensor,
     num_envs: int,
     value_size: int,
-):
+) -> Tensor:
     return torch.sum(reward.view(num_envs, value_size, -1), dim=-1).flatten()
 
 
@@ -63,7 +109,7 @@ def terminated_buf_update(
     terminated_buf: Tensor,
     terminated: Tensor,
     num_envs: int,
-):
+) -> Tensor:
     return torch.logical_or(terminated_buf, terminated.view(num_envs, -1))
 
 
@@ -73,7 +119,7 @@ def start_pose_radian(
     up_axis_idx=gymapi.UP_AXIS_Z,
     radius_coef=0.75,
     randomize_coef=1.,
-):
+) -> Tensor:
     init_pos_radius = num_agents * radius_coef
     pos = torch.arange(0, num_agents) * 2. * math.pi / num_agents
     pos = pos.repeat(3, num_envs).T.view(num_envs, num_agents, -1)
@@ -289,14 +335,17 @@ class MultiAgentVecTask(VecTask):
             torch.logical_not(torch.all(self.terminated_buf.view(self.num_envs, self.value_size, -1), dim=-1)).flatten()
         ] += 1
 
-    def clear_terminated_actions(self, actions):
-        actions.view(self.num_envs * self.num_agents, -1)[self.terminated_buf.flatten()] = 0
-        return actions
+    def select_terminated(self, x):
+        return x.view(self.num_envs * self.num_agents, -1)[self.terminated_buf.flatten()]
+
+    def clear_terminated(self, x):
+        x.view(self.num_envs * self.num_agents, -1)[self.terminated_buf.flatten()] = 0
+        return x
 
     def terminate_agents(self):
-        if not self.viewer or not self.debug_viz:
-            return
         for env_id, actor_id in torch.nonzero(self.terminated_buf, as_tuple=False).tolist():
+            if not self.viewer or not self.debug_viz:
+                continue
             team = self.get_team_id(actor_id)
             chassis_color = gymapi.Vec3(*[random.random() for _ in range(3)]) + self.team_colors[team]
             self.gym.set_rigid_body_color(
