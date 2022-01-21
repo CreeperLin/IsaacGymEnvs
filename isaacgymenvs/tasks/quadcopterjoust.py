@@ -40,7 +40,7 @@ from utils.torch_jit_utils import quat_axis
 # from .base.vec_task import VecTask
 from .base.ma_vec_task import MultiAgentVecTask,\
     reset_any_team_all_terminated, reset_max_episode_length,\
-    obs_all_nearest_neighbors, obs_get_by_env_index,\
+    obs_all_nearest_neighbors, obs_get_by_env_index, obs_same_team_index, obs_rel_pos_by_env_index,\
     reward_sum_team, reward_reweight_team,\
     terminated_buf_update,\
     start_pose_radian
@@ -62,7 +62,10 @@ class QuadcopterJoust(MultiAgentVecTask):
         # 0:13 - root state
         # 13:29 - DOF states
         num_obs = 21
-        num_obs += 21 * 2
+        n_agts = cfg["env"].get("numAgentsPerTeam", 1) * cfg["env"].get("numTeams", 1)
+        num_rng = min(n_agts - 1, 2)
+        num_obs += (21 + 1 + 3) * num_rng
+        self.num_rng = num_rng
 
         # Actions:
         # 0:8 - rotor DOF position targets
@@ -382,6 +385,8 @@ class QuadcopterJoust(MultiAgentVecTask):
             self.terminated_buf,
             self.num_envs,
             self.num_agents,
+            self.num_rng,
+            self.value_size
         )
         return self.obs_buf
 
@@ -411,6 +416,8 @@ def compute_quadcopter_observations(
     terminated_buf: Tensor,
     num_envs: int,
     num_agents: int,
+    num_rng: int,
+    value_size: int,
 ) -> Tensor:
     root_positions = root_states[..., 0:3]
     root_quats = root_states[..., 3:7]
@@ -424,13 +431,20 @@ def compute_quadcopter_observations(
     obs_buf[..., 13:21] = dof_positions
 
     if num_agents > 1:
-        ind = obs_all_nearest_neighbors(root_positions, num_envs, num_agents, 2)
-        rel_obs = obs_get_by_env_index(obs_buf[..., :21], ind, num_envs, num_agents)
+        ind = obs_all_nearest_neighbors(root_positions, num_envs, num_agents, num_rng)
+        rel_obs_obs = obs_get_by_env_index(obs_buf[..., :21], ind, num_envs, num_agents)
+        rel_pos_obs = obs_rel_pos_by_env_index(root_positions, ind, num_envs, num_agents)
+        team_obs = obs_same_team_index(ind, num_envs, num_agents, value_size)
         # obs_buf = torch.cat((
         #     obs_buf,
         #     rel_obs.view(obs_buf.shape[0], -1),
         # ), dim=-1)
-        obs_buf[..., 21:] = rel_obs.view(obs_buf.shape[0], -1)
+        # obs_buf[..., 21:] = rel_obs.view(obs_buf.shape[0], -1)
+        obs_buf[..., 21:] = torch.cat((
+            team_obs.view(obs_buf.shape[0], -1),
+            rel_pos_obs.view(obs_buf.shape[0], -1),
+            rel_obs_obs.view(obs_buf.shape[0], -1),
+        ), dim=-1)
 
     obs_buf[terminated_buf.flatten(), :] = 0
 
@@ -475,7 +489,7 @@ def compute_quadcopter_reward(
         # + alive_reward \
     reward = 0 \
         + pos_reward \
-        + pos_reward * (up_reward + spinnage_reward)
+        # + pos_reward * (up_reward + spinnage_reward)
 
     # resets due to misbehavior
     ones = torch.ones_like(target_dist, dtype=torch.bool)
@@ -493,9 +507,9 @@ def compute_quadcopter_reward(
         jousted = torch.logical_and(proxm, tgt_z_pos - z_pos > 0.1).flatten()
         jouster = torch.logical_and(proxm, z_pos - tgt_z_pos > 0.1).flatten()
         terminated = torch.where(jousted, ones, terminated)
-        joust_score = 2000
-        reward[jousted] -= joust_score
+        joust_score = 100
         reward[jouster] += joust_score
+        # reward[jousted] -= joust_score
 
     reward = torch.where(terminated, torch.ones_like(reward) * (-2.0), reward)
 
@@ -503,7 +517,7 @@ def compute_quadcopter_reward(
 
     reward = reward_sum_team(reward, num_envs, value_size)
 
-    reward = reward_reweight_team(reward, reward_weight)
+    # reward = reward_reweight_team(reward, reward_weight)
 
     reset = reset_any_team_all_terminated(reset_buf, terminated, num_envs, value_size)
     # resets due to episode length

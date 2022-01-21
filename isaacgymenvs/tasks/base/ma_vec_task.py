@@ -56,7 +56,10 @@ def obs_same_team_index(
     num_agents: int,
     num_teams: int
 ) -> Tensor:
-    return ind // num_teams
+    return (
+        (torch.arange(0, num_agents, device=ind.device) // num_teams).repeat(num_envs, 1).unsqueeze(-1)
+        == (ind // num_teams)
+    ).float()
 
 
 @torch.jit.script
@@ -90,8 +93,9 @@ def reward_reweight_team(
     reward: Tensor,
     reward_weight: Tensor,
 ) -> Tensor:
-    if reward_weight.shape[0] > 1:
-        reward = reward @ reward_weight
+    value_size = reward_weight.shape[0]
+    if value_size > 1:
+        reward = (reward.view(-1, value_size) @ reward_weight).flatten()
     return reward
 
 
