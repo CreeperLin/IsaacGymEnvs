@@ -59,7 +59,7 @@ def obs_same_team_index(
     return (
         (torch.arange(0, num_agents, device=ind.device) // num_teams).repeat(num_envs, 1).unsqueeze(-1)
         == (ind // num_teams)
-    ).float()
+    )
 
 
 @torch.jit.script
