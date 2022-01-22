@@ -56,9 +56,10 @@ def obs_same_team_index(
     num_agents: int,
     num_teams: int
 ) -> Tensor:
+    num_agts_team = num_agents // num_teams
     return (
-        (torch.arange(0, num_agents, device=ind.device) // num_teams).repeat(num_envs, 1).unsqueeze(-1)
-        == (ind // num_teams)
+        (torch.arange(0, num_agents, device=ind.device) // num_agts_team).repeat(num_envs, 1).unsqueeze(-1)
+        == (ind // num_agts_team)
     )
 
 
@@ -117,7 +118,7 @@ def terminated_buf_update(
     return torch.logical_or(terminated_buf, terminated.view(num_envs, -1))
 
 
-def start_pose_radian(
+def start_pos_circle(
     num_envs,
     num_agents,
     up_axis_idx=gymapi.UP_AXIS_Z,
