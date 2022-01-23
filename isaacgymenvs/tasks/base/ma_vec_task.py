@@ -101,7 +101,7 @@ def reward_reweight_team(
 
 
 @torch.jit.script
-def reward_sum_team(
+def reward_agg_sum(
     reward: Tensor,
     num_envs: int,
     value_size: int,
@@ -148,14 +148,6 @@ class MultiAgentVecTask(VecTask):
         self.num_agents_team = config["env"].get("numAgentsPerTeam", 1)
         self.num_agents = self.num_agents_team * self.num_teams
         config["env"]["numAgents"] = self.num_agents
-        self.num_agents_export = config["env"].get("numAgentsExport", self.num_teams)
-
-        self.ma_supported = config["env"].get("maSupported", True)
-        space_mult = self.num_agents // (self.num_agents_export if self.ma_supported else 1)
-        self.num_obs_per_agent = config["env"]["numObservations"]
-        self.num_acts_per_agent = config["env"]["numActions"]
-        config["env"]["numObservations"] = self.num_obs_per_agent * space_mult
-        config["env"]["numActions"] = self.num_acts_per_agent * space_mult
         self.reward_sum = config["env"].get("rewardSum", 'team')
         zero_sum = config["env"].get("rewardZeroSum", True)
         if self.reward_sum == 'team':
@@ -165,7 +157,13 @@ class MultiAgentVecTask(VecTask):
         elif self.reward_sum in [None, 'none']:
             value_size = self.num_agents
         self.value_size = value_size
+        self.num_agents_export = value_size
         self.value_size_export = self.value_size // self.num_agents_export
+        space_mult = self.num_agents // self.num_agents_export
+        self.num_obs_per_agent = config["env"]["numObservations"]
+        self.num_acts_per_agent = config["env"]["numActions"]
+        config["env"]["numObservations"] = self.num_obs_per_agent * space_mult
+        config["env"]["numActions"] = self.num_acts_per_agent * space_mult
         team_colors = [
             (0.97, 0.38, 0.06),
             (0.38, 0.06, 0.97),
@@ -337,7 +335,9 @@ class MultiAgentVecTask(VecTask):
 
     def update_progress(self):
         self.progress_buf[
-            torch.logical_not(torch.all(self.terminated_buf.view(self.num_envs, self.value_size, -1), dim=-1)).flatten()
+            torch.logical_not(
+                torch.all(self.terminated_buf.view(self.num_envs, self.num_agents_export, -1), dim=-1)
+            ).flatten()
         ] += 1
 
     def select_terminated(self, x):
