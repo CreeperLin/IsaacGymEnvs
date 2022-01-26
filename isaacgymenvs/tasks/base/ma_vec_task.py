@@ -183,9 +183,12 @@ class MultiAgentVecTask(VecTask):
         )
 
         self.root_state_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
-        self.dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
         self.root_states = gymtorch.wrap_tensor(self.root_state_tensor).view(self.num_agts, -1)
-        self.dof_states = gymtorch.wrap_tensor(self.dof_state_tensor).view(self.num_agts, -1, 2)
+        self.dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
+        if self.dof_state_tensor.ndim == 0:
+            self.dof_states = None
+        else:
+            self.dof_states = gymtorch.wrap_tensor(self.dof_state_tensor).view(self.num_agts, -1, 2)
 
         reward_weight = torch.ones((value_size, value_size), device=self.device, dtype=torch.float)
         if zero_sum and value_size > 1:
@@ -211,10 +214,11 @@ class MultiAgentVecTask(VecTask):
                 (save_replay_episodes, self.num_agents, 13),
                 device=self.replay_device, dtype=torch.float
             )
-            self.replay_dof_states = torch.zeros(
-                (save_replay_episodes, self.num_agents, self.dof_states.shape[1], 2),
-                device=self.replay_device, dtype=torch.float
-            )
+            if self.dof_states is not None:
+                self.replay_dof_states = torch.zeros(
+                    (save_replay_episodes, self.num_agents, self.dof_states.shape[1], 2),
+                    device=self.replay_device, dtype=torch.float
+                )
 
     def add_actor(self, actor_handle):
         self.actor_handles[-1].append(actor_handle)
@@ -283,6 +287,8 @@ class MultiAgentVecTask(VecTask):
         return agt_id // self.num_agents_team
 
     def get_reset_agent_ids(self, env_ids):
+        if self.num_agents == 1:
+            return env_ids
         ent_ids = (env_ids * self.num_agents).repeat(self.num_agents).view(self.num_agents, -1)
         ent_ids += torch.arange(0, self.num_agents).view(-1, 1).to(device=self.device)
         return ent_ids.flatten().to(dtype=torch.long)
@@ -292,9 +298,10 @@ class MultiAgentVecTask(VecTask):
             self.replay_episode_pt += 1
             print('load', self.replay_episode_pt, self.replay_action_pt)
             self.root_states[:self.num_agents] = self.replay_root_states[self.replay_episode_pt].to(self.device)
-            self.dof_states[:self.num_agents] = self.replay_dof_states[self.replay_episode_pt].to(self.device)
             self.gym.set_actor_root_state_tensor(self.sim, self.root_state_tensor)
-            self.gym.set_dof_state_tensor(self.sim, self.dof_state_tensor)
+            if self.dof_states is not None:
+                self.dof_states[:self.num_agents] = self.replay_dof_states[self.replay_episode_pt].to(self.device)
+                self.gym.set_dof_state_tensor(self.sim, self.dof_state_tensor)
             self.replay_action_pt = -1
             if self.replay_episode_pt >= len(self.replay_root_states) - 1:
                 self.replay_mode = False
@@ -302,9 +309,10 @@ class MultiAgentVecTask(VecTask):
             self.replay_episode_pt += 1
             print('save', self.replay_episode_pt, self.replay_action_pt)
             root_states = self.root_states[:self.num_agents].to(self.replay_device)
-            dof_states = self.dof_states[:self.num_agents].to(self.replay_device)
             self.replay_root_states[self.replay_episode_pt] = root_states
-            self.replay_dof_states[self.replay_episode_pt] = dof_states
+            if self.dof_states is not None:
+                dof_states = self.dof_states[:self.num_agents].to(self.replay_device)
+                self.replay_dof_states[self.replay_episode_pt] = dof_states
             self.replay_action_pt = -1
             if self.replay_episode_pt >= self.save_replay_episodes - 1:
                 self.save_replay_state_dict(self.save_replay_path)
