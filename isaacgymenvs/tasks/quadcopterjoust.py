@@ -526,12 +526,11 @@ def compute_quadcopter_reward(
     reward = reward_agg_sum(reward, num_envs, value_size)
 
     # reward = reward_reweight_team(reward, reward_weight)
+    terminated_buf = terminated_buf_update(terminated_buf, terminated, num_envs)
 
-    reset = reset_any_team_all_terminated(reset_buf, terminated, num_envs, num_teams)
+    reset = reset_any_team_all_terminated(reset_buf, terminated_buf, num_envs, num_teams)
     # resets due to episode length
     # reset = torch.where(progress_buf >= max_episode_length - 1, ones, terminated)
     reset = reset_max_episode_length(reset, progress_buf, num_envs, max_episode_length)
-
-    terminated_buf = terminated_buf_update(terminated_buf, terminated, num_envs)
 
     return reward, reset, terminated_buf

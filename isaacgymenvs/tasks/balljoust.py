@@ -64,12 +64,6 @@ class BallJoust(MultiAgentVecTask):
             cam_target = gymapi.Vec3(2.2, 2.0, 1.0)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
-            # need rigid body states for visualizing thrusts
-            self.rb_state_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
-            self.rb_states = gymtorch.wrap_tensor(self.rb_state_tensor).view(self.num_agts, 13)
-            self.rb_positions = self.rb_states[..., 0:3]
-            self.rb_quats = self.rb_states[..., 3:7]
-
     def create_sim(self):
         self.sim_params.up_axis = gymapi.UP_AXIS_Z
         self.sim_params.gravity.x = 0
@@ -148,6 +142,10 @@ class BallJoust(MultiAgentVecTask):
                 self.gym.set_rigid_body_color(env, actor_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, chassis_color)
                 self.add_actor(actor_handle)
 
+        if self.debug_viz:
+            # need env offsets for the rotors
+            self.env_offsets = self.get_env_offsets().view(-1, 3)
+
     def reset_idx(self, env_ids):
         agt_ids = self.get_reset_agent_ids(env_ids)
         num_resets = len(agt_ids)
@@ -165,8 +163,6 @@ class BallJoust(MultiAgentVecTask):
         super().reset_idx(env_ids)
 
     def pre_physics_step(self, _actions):
-        # for env_id, actor_id in torch.nonzero(self.terminated_buf, as_tuple=False).tolist():
-            # print(actor_id)
         # resets
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1)
         if len(reset_env_ids) > 0:
@@ -208,19 +204,15 @@ class BallJoust(MultiAgentVecTask):
         # debug viz
         if self.viewer and self.debug_viz:
             # compute start and end positions for visualizing thrust lines
-            self.gym.refresh_rigid_body_state_tensor(self.sim)
-            rotor_indices = torch.LongTensor([2, 4, 6, 8])
-            quats = self.rb_quats[:, rotor_indices]
-            dirs = -quat_axis(quats.view(self.num_agts * 4, 4), 2).view(self.num_agts, 4, 3)
-            starts = self.rb_positions[:, rotor_indices] + self.rotor_env_offsets
-            ends = starts + 0.1 * self.thrusts.view(self.num_agts, 4, 1) * dirs
+            starts = self.root_states[:, 0:3] + self.env_offsets
+            ends = starts + 0.1 * self.forces
 
             # submit debug line geometry
-            verts = torch.stack([starts, ends], dim=2).cpu().numpy()
-            colors = np.zeros((self.num_agts * 4, 3), dtype=np.float32)
+            verts = torch.cat([starts, ends], dim=-1).cpu().numpy()
+            colors = np.zeros((self.num_agts, 3), dtype=np.float32)
             colors[..., 0] = 1.0
             self.gym.clear_lines(self.viewer)
-            self.gym.add_lines(self.viewer, None, self.num_agts * 4, verts, colors)
+            self.gym.add_lines(self.viewer, None, self.num_agts, verts, colors)
 
     def compute_observations(self):
         self.obs_buf[:] = compute_balljoust_observations(
@@ -368,11 +360,11 @@ def compute_balljoust_reward(
 
     # reward = reward_reweight_team(reward, reward_weight)
 
-    reset = reset_any_team_all_terminated(reset_buf, terminated, num_envs, num_teams)
+    terminated_buf = terminated_buf_update(terminated_buf, terminated, num_envs)
+
+    reset = reset_any_team_all_terminated(reset_buf, terminated_buf, num_envs, num_teams)
     # resets due to episode length
     # reset = torch.where(progress_buf >= max_episode_length - 1, ones, terminated)
     reset = reset_max_episode_length(reset, progress_buf, num_envs, max_episode_length)
-
-    terminated_buf = terminated_buf_update(terminated_buf, terminated, num_envs)
 
     return reward, reset, terminated_buf

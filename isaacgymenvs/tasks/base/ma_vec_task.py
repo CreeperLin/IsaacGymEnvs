@@ -68,11 +68,11 @@ def reset_any_team_all_terminated(
     reset: Tensor,
     terminated: Tensor,
     num_envs: int,
-    value_size: int,
+    num_teams: int,
 ) -> Tensor:
     reset_ones = torch.ones_like(reset)
     return torch.where(
-        torch.any(torch.all(terminated.view(num_envs, value_size, -1), dim=-1), dim=-1), reset_ones, reset
+        torch.any(torch.all(terminated.view(num_envs, num_teams, -1), dim=-1), dim=-1), reset_ones, reset
     )
 
 
@@ -292,6 +292,13 @@ class MultiAgentVecTask(VecTask):
         ent_ids = (env_ids * self.num_agents).repeat(self.num_agents).view(self.num_agents, -1)
         ent_ids += torch.arange(0, self.num_agents).view(-1, 1).to(device=self.device)
         return ent_ids.flatten().to(dtype=torch.long)
+
+    def get_env_offsets(self):
+        env_offsets = torch.zeros((self.num_envs, self.num_agents, 3), device=self.device)
+        for i in range(self.num_envs):
+            env_origin = self.gym.get_env_origin(self.env_handles[i])
+            env_offsets[i, :, :] = torch.tensor([env_origin.x, env_origin.y, env_origin.z])
+        return env_offsets
 
     def reset_idx(self, env_ids):
         if self.replay_mode:
