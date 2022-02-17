@@ -526,7 +526,7 @@ def compute_quadcopter_reward(
     reward = reward_agg_sum(reward, num_envs, value_size)
 
     # reward = reward_reweight_team(reward, reward_weight)
-    terminated_buf = terminated_buf_update(terminated_buf, terminated, num_envs)
+    terminated_buf = terminated_buf_update(terminated_buf, terminated)
 
     reset = reset_any_team_all_terminated(reset_buf, terminated_buf, num_envs, num_teams)
     # resets due to episode length

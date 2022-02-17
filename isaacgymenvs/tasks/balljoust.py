@@ -227,17 +227,18 @@ class BallJoust(MultiAgentVecTask):
         return self.obs_buf
 
     def compute_reward(self):
-        self.rew_buf[:], self.reset_buf[:], self.terminated_buf[:] = compute_balljoust_reward(
+        self.rew_buf[:], self.reset_buf[:], self.terminated_buf[:], self.cod_buf[:] = compute_balljoust_reward(
             self.root_states,
             self.reset_buf,
             self.terminated_buf,
+            self.cod_buf,
             self.progress_buf,
             self.reward_weight,
             self.max_episode_length,
             self.num_envs,
             self.num_agents,
             self.num_teams,
-            self.value_size,
+            self.value_size
         )
 
 
@@ -276,7 +277,7 @@ def compute_balljoust_observations(
             rel_obs_obs.view(obs_buf.shape[0], -1),
         ), dim=-1)
 
-    obs_buf[terminated_buf.flatten(), :] = 0
+    obs_buf[terminated_buf, :] = 0
 
     return obs_buf
 
@@ -286,6 +287,7 @@ def compute_balljoust_reward(
     root_states: Tensor,
     reset_buf: Tensor,
     terminated_buf: Tensor,
+    cod_buf: Tensor,
     progress_buf: Tensor,
     reward_weight: Tensor,
     max_episode_length: int,
@@ -293,7 +295,7 @@ def compute_balljoust_reward(
     num_agents: int,
     num_teams: int,
     value_size: int,
-) -> Tuple[Tensor, Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     root_positions = root_states[..., 0:3]
     z_pos = root_states[..., 2]
     # distance to target
@@ -326,11 +328,17 @@ def compute_balljoust_reward(
         # + pos_reward * (up_reward + spinnage_reward)
 
     # resets due to misbehavior
+    boundary = 10.0
     ones = torch.ones_like(z_pos, dtype=torch.bool)
     terminated = torch.zeros_like(z_pos, dtype=torch.bool)
     # terminated = torch.where(target_dist > 4.0, ones, terminated)
-    terminated = torch.where(root_dist > 4.0, ones, terminated)
+    terminated = torch.where(root_dist > boundary, ones, terminated)
+    cod_buf = torch.where(root_dist > boundary, ones*1, cod_buf)
     terminated = torch.where(root_positions[..., 2] < 0.3, ones, terminated)
+    cod_buf = torch.where(root_positions[..., 2] < 0.3, ones*2, cod_buf)
+
+    suicide_cost = -100.0
+    reward = torch.where(terminated, torch.ones_like(reward) * suicide_cost, reward)
 
     if num_agents > 1:
         pos = root_positions.view(num_envs, num_agents, -1)
@@ -344,6 +352,8 @@ def compute_balljoust_reward(
         jousted = torch.logical_and(precond, tgt_z_pos - z_pos > 0.1)
         jouster = torch.logical_and(precond, z_pos - tgt_z_pos > 0.1)
         terminated = torch.where(jousted.flatten(), ones, terminated)
+        cod_buf = torch.where(jousted.flatten(), ones*3, cod_buf)
+        reward = torch.where(jousted.flatten(), torch.ones_like(reward) * (-2.0), reward)
         joust_score = 1000
         same_team = obs_same_team_index(ind.unsqueeze(-1), num_envs, num_agents, num_teams).squeeze()
         ek_jouster = torch.logical_and(torch.logical_not(same_team), jouster)
@@ -352,19 +362,17 @@ def compute_balljoust_reward(
         # reward[tk_jouster.flatten()] -= joust_score
         # reward[jousted] -= joust_score
 
-    reward = torch.where(terminated, torch.ones_like(reward) * (-2.0), reward)
-
-    reward = torch.where(terminated_buf.flatten(), torch.zeros_like(reward), reward)
+    reward = torch.where(terminated_buf, torch.zeros_like(reward), reward)
 
     reward = reward_agg_sum(reward, num_envs, value_size)
 
     # reward = reward_reweight_team(reward, reward_weight)
 
-    terminated_buf = terminated_buf_update(terminated_buf, terminated, num_envs)
+    terminated_buf = terminated_buf_update(terminated_buf, terminated)
 
     reset = reset_any_team_all_terminated(reset_buf, terminated_buf, num_envs, num_teams)
     # resets due to episode length
     # reset = torch.where(progress_buf >= max_episode_length - 1, ones, terminated)
     reset = reset_max_episode_length(reset, progress_buf, num_envs, max_episode_length)
 
-    return reward, reset, terminated_buf
+    return reward, reset, terminated_buf, cod_buf

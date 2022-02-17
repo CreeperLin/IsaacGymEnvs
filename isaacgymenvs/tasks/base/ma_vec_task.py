@@ -113,9 +113,8 @@ def reward_agg_sum(
 def terminated_buf_update(
     terminated_buf: Tensor,
     terminated: Tensor,
-    num_envs: int,
 ) -> Tensor:
-    return torch.logical_or(terminated_buf, terminated.view(num_envs, -1))
+    return torch.logical_or(terminated_buf, terminated.flatten())
 
 
 def start_pos_circle(
@@ -177,6 +176,7 @@ class MultiAgentVecTask(VecTask):
         self.viewer_render_collision = False
         self.actor_handles = []
         self.env_handles = []
+        self.callbacks = {}
 
         super().__init__(
             config=config, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless
@@ -195,7 +195,8 @@ class MultiAgentVecTask(VecTask):
             reward_weight *= (-1 / (value_size-1))
             reward_weight[[torch.arange(0, value_size)] * 2] = 1.
         self.reward_weight = reward_weight
-        self.terminated_buf = torch.zeros((self.num_envs, self.num_agents), device=self.device, dtype=torch.bool)
+        self.terminated_buf = torch.zeros(self.num_envs * self.num_agents, device=self.device, dtype=torch.bool)
+        self.cod_buf = torch.zeros(self.num_envs * self.num_agents, device=self.device, dtype=torch.long)
 
         save_replay_episodes = config["env"].get("saveReplayEpisodes", 0)
         self.save_replay_path = config["env"].get("saveReplayPath", "./replay.pt")
@@ -219,6 +220,7 @@ class MultiAgentVecTask(VecTask):
                     (save_replay_episodes, self.num_agents, self.dof_states.shape[1], 2),
                     device=self.replay_device, dtype=torch.float
                 )
+        self.exec_callback('init')
 
     def add_actor(self, actor_handle):
         self.actor_handles[-1].append(actor_handle)
@@ -300,7 +302,22 @@ class MultiAgentVecTask(VecTask):
             env_offsets[i, :, :] = torch.tensor([env_origin.x, env_origin.y, env_origin.z])
         return env_offsets
 
+    def add_callback(self, key, cb):
+        cbs = self.callbacks.get(key, None)
+        if cbs is None:
+            cbs = []
+            self.callbacks[key] = cbs
+        cbs.append(cb)
+
+    def exec_callback(self, key, *args, **kwargs):
+        cbs = self.callbacks.get(key)
+        if cbs is None:
+            return
+        for cb in cbs:
+            cb(self, *args, **kwargs)
+
     def reset_idx(self, env_ids):
+        self.exec_callback('reset_idx', env_ids)
         if self.replay_mode:
             self.replay_episode_pt += 1
             print('load', self.replay_episode_pt, self.replay_action_pt)
@@ -327,6 +344,7 @@ class MultiAgentVecTask(VecTask):
         self.progress_buf.view(self.num_envs, -1)[env_ids] = 0
         self.reset_buf.view(self.num_envs, -1)[env_ids] = 0
         self.terminated_buf.view(self.num_envs, -1)[env_ids] = 0
+        self.cod_buf.view(self.num_envs, -1)[env_ids] = 0
 
     def get_obs_export(self):
         return torch.clamp(self.obs_buf, -self.clip_obs, self.clip_obs)\
@@ -341,7 +359,9 @@ class MultiAgentVecTask(VecTask):
             self.replay_action_pt += 1
             replay_actions = actions[:self.num_agents_export].to(self.replay_device)
             self.replay_actions[self.replay_episode_pt][self.replay_action_pt] = replay_actions
+        self.exec_callback('pre_step')
         obs_dict, rew_buf, reset_buf, extras = super().step(actions)
+        self.exec_callback('post_step')
         if self.num_agents_export > 1:
             obs_dict['obs'] = obs_dict['obs'].view(self.num_envs * self.num_agents_export, self.num_obs)
             reset_buf = reset_buf.repeat(self.num_agents_export)
@@ -356,14 +376,15 @@ class MultiAgentVecTask(VecTask):
         ] += 1
 
     def select_terminated(self, x):
-        return x.view(self.num_envs * self.num_agents, -1)[self.terminated_buf.flatten()]
+        return x.view(self.num_envs * self.num_agents, -1)[self.terminated_buf]
 
     def clear_terminated(self, x):
-        x.view(self.num_envs * self.num_agents, -1)[self.terminated_buf.flatten()] = 0
+        x.view(self.num_envs * self.num_agents, -1)[self.terminated_buf] = 0
         return x
 
     def terminate_agents(self):
-        for env_id, actor_id in torch.nonzero(self.terminated_buf, as_tuple=False).tolist():
+        term_list = torch.nonzero(self.terminated_buf.view(self.num_envs, self.num_agents), as_tuple=False).tolist()
+        for env_id, actor_id in term_list:
             if not self.viewer or not self.debug_viz:
                 continue
             team = self.get_team_id(actor_id)
@@ -388,6 +409,7 @@ class MultiAgentVecTask(VecTask):
         # asymmetric actor-critic
         if self.num_states > 0:
             self.obs_dict["states"] = self.get_state()
+        self.exec_callback('reset')
 
         return self.obs_dict
 

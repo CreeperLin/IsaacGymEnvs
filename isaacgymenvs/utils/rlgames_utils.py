@@ -92,7 +92,7 @@ def get_rlgames_env_creator(
         )
 
         if post_create_hook is not None:
-            post_create_hook()
+            post_create_hook(env)
 
         return env
     return create_rlgpu_env

@@ -58,6 +58,30 @@ OmegaConf.register_new_resolver('if', lambda pred, a, b: a if pred else b)
 OmegaConf.register_new_resolver('resolve_default', lambda default, arg: default if arg=='' else arg)
 OmegaConf.register_new_resolver('resolve_eval', lambda fx, *args: eval(fx)(*args))
 
+
+total_term = [0, 0]
+
+
+def on_post_step(env):
+    # print(env.terminated_buf.view(env.num_envs, -1)[0].int())
+    team_term = env.terminated_buf.view(env.num_envs, -1)[0].view(2, -1).int().tolist()
+    cod = env.cod_buf.view(env.num_envs, -1)[0].view(2, -1).int().tolist()
+    print(team_term, cod)
+
+
+def on_reset_idx(env, env_ids):
+    global total_term
+    team_term = env.terminated_buf.view(env.num_envs, -1)[env_ids].view(2, -1).all(dim=-1).int().tolist()
+    # cod = env.cod_buf.view(env.num_envs, -1)[0].view(2, -1).int().tolist()
+    total_term = [tt+t for tt, t in zip(total_term, team_term)]
+    print(team_term, total_term)
+
+
+def post_create_hook(env):
+    env.add_callback('reset_idx', on_reset_idx)
+    env.add_callback('post_step', on_post_step)
+
+
 @hydra.main(config_name="config", config_path="./cfg")
 def launch_rlg_hydra(cfg: DictConfig):
 
@@ -84,6 +108,7 @@ def launch_rlg_hydra(cfg: DictConfig):
         cfg.graphics_device_id,
         cfg.headless,
         multi_gpu=cfg.multi_gpu,
+        post_create_hook=post_create_hook if cfg.test else None,
     )
 
     # register the rl-games adapter to use inside the runner
