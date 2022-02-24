@@ -140,6 +140,24 @@ def start_pos_circle(
     return pos
 
 
+def start_pos_normal(
+    num_envs,
+    num_agents,
+    radius=1,
+) -> Tensor:
+    pos = torch.randn(num_envs, num_agents, 3) * radius
+    return pos
+
+
+def start_pos_uniform(
+    num_envs,
+    num_agents,
+    radius=1,
+) -> Tensor:
+    pos = torch.rand(num_envs, num_agents, 3) * radius * 2 - radius
+    return pos
+
+
 class MultiAgentVecTask(VecTask):
 
     def __init__(self, config, sim_device, graphics_device_id, headless):
@@ -385,14 +403,10 @@ class MultiAgentVecTask(VecTask):
     def terminate_agents(self):
         term_list = torch.nonzero(self.terminated_buf.view(self.num_envs, self.num_agents), as_tuple=False).tolist()
         for env_id, actor_id in term_list:
-            if not self.viewer or not self.debug_viz:
-                continue
-            team = self.get_team_id(actor_id)
-            chassis_color = gymapi.Vec3(*[random.random() for _ in range(3)]) + self.team_colors[team]
-            self.gym.set_rigid_body_color(
-                self.get_env(env_id), self.get_actor(env_id, actor_id),
-                0, gymapi.MESH_VISUAL_AND_COLLISION, chassis_color
-            )
+            self.terminate_agent(env_id, actor_id)
+
+    def terminate_agent(self, env_id, actor_id):
+        pass
 
     def reset(self) -> torch.Tensor:
         """Reset the environment.

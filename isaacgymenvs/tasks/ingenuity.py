@@ -48,23 +48,26 @@ class Ingenuity(VecTask):
 
         # Observations:
         # 0:13 - root state
-        self.cfg["env"]["numObservations"] = 13
+        # self.cfg["env"]["numObservations"] = 13
+        self.cfg["env"]["numObservations"] = 6
 
         # Actions:
         # 0:3 - xyz force vector for lower rotor
         # 4:6 - xyz force vector for upper rotor
-        self.cfg["env"]["numActions"] = 6
+        self.cfg["env"]["numActions"] = 3
+        # self.cfg["env"]["numActions"] = 6
 
         super().__init__(config=self.cfg, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless)
 
-        dofs_per_env = 4
-        bodies_per_env = 6
+        # dofs_per_env = 4
+        # bodies_per_env = 6
+        bodies_per_env = 2
 
         self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
-        self.dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
+        # self.dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
 
         vec_root_tensor = gymtorch.wrap_tensor(self.root_tensor).view(self.num_envs, 2, 13)
-        vec_dof_tensor = gymtorch.wrap_tensor(self.dof_state_tensor).view(self.num_envs, dofs_per_env, 2)
+        # vec_dof_tensor = gymtorch.wrap_tensor(self.dof_state_tensor).view(self.num_envs, dofs_per_env, 2)
 
         self.root_states = vec_root_tensor[:, 0, :]
         self.root_positions = self.root_states[:, 0:3]
@@ -77,23 +80,27 @@ class Ingenuity(VecTask):
         self.marker_states = vec_root_tensor[:, 1, :]
         self.marker_positions = self.marker_states[:, 0:3]
 
-        self.dof_states = vec_dof_tensor
-        self.dof_positions = vec_dof_tensor[..., 0]
-        self.dof_velocities = vec_dof_tensor[..., 1]
+        # self.dof_states = vec_dof_tensor
+        # self.dof_positions = vec_dof_tensor[..., 0]
+        # self.dof_velocities = vec_dof_tensor[..., 1]
 
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_dof_state_tensor(self.sim)
 
         self.initial_root_states = self.root_states.clone()
-        self.initial_dof_states = self.dof_states.clone()
+        # self.initial_dof_states = self.dof_states.clone()
 
         self.thrust_lower_limit = 0
-        self.thrust_upper_limit = 2000
-        self.thrust_lateral_component = 0.2
+        # self.thrust_upper_limit = 2000
+        # self.thrust_upper_limit = 4000
+        self.thrust_upper_limit = 8000
+        # self.thrust_lateral_component = 0.2
+        self.thrust_lateral_component = 0.7
 
         # control tensors
         self.thrusts = torch.zeros((self.num_envs, 2, 3), dtype=torch.float32, device=self.device, requires_grad=False)
         self.forces = torch.zeros((self.num_envs, bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
+        # self.forces = torch.zeros((self.num_envs, 3), dtype=torch.float32, device=self.device, requires_grad=False)
 
         self.all_actor_indices = torch.arange(self.num_envs * 2, dtype=torch.int32, device=self.device).reshape((self.num_envs, 2))
 
@@ -114,7 +121,8 @@ class Ingenuity(VecTask):
         # Mars gravity
         self.sim_params.gravity.x = 0
         self.sim_params.gravity.y = 0
-        self.sim_params.gravity.z = -3.721
+        # self.sim_params.gravity.z = -3.721
+        self.sim_params.gravity.z = 0
 
         self.sim = super().create_sim(self.device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
         self.dt = self.sim_params.dt
@@ -240,7 +248,8 @@ class Ingenuity(VecTask):
         upper = gymapi.Vec3(spacing, spacing, spacing)
 
         asset_root = "./"
-        asset_file = "ingenuity.xml"
+        # asset_file = "ingenuity.xml"
+        asset_file = "ball.xml"
 
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = False
@@ -262,10 +271,10 @@ class Ingenuity(VecTask):
             env = self.gym.create_env(self.sim, lower, upper, num_per_row)
             actor_handle = self.gym.create_actor(env, asset, default_pose, "ingenuity", i, 1, 1)
 
-            dof_props = self.gym.get_actor_dof_properties(env, actor_handle)
-            dof_props['stiffness'].fill(0)
-            dof_props['damping'].fill(0)
-            self.gym.set_actor_dof_properties(env, actor_handle, dof_props)
+            # dof_props = self.gym.get_actor_dof_properties(env, actor_handle)
+            # dof_props['stiffness'].fill(0)
+            # dof_props['damping'].fill(0)
+            # self.gym.set_actor_dof_properties(env, actor_handle, dof_props)
 
             marker_handle = self.gym.create_actor(env, marker_asset, default_pose, "marker", i, 1, 1)
             self.gym.set_rigid_body_color(env, marker_handle, 0, gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(1, 0, 0))
@@ -297,8 +306,8 @@ class Ingenuity(VecTask):
     def reset_idx(self, env_ids):
 
         # set rotor speeds
-        self.dof_velocities[:, 1] = -50
-        self.dof_velocities[:, 3] = 50
+        # self.dof_velocities[:, 1] = -50
+        # self.dof_velocities[:, 3] = 50
 
         num_resets = len(env_ids)
 
@@ -311,7 +320,7 @@ class Ingenuity(VecTask):
         self.root_states[env_ids, 1] += torch_rand_float(-1.5, 1.5, (num_resets, 1), self.device).flatten()
         self.root_states[env_ids, 2] += torch_rand_float(-0.2, 1.5, (num_resets, 1), self.device).flatten()
 
-        self.gym.set_dof_state_tensor_indexed(self.sim, self.dof_state_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets)
+        # self.gym.set_dof_state_tensor_indexed(self.sim, self.dof_state_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets)
 
         self.reset_buf[env_ids] = 0
         self.progress_buf[env_ids] = 0
@@ -338,18 +347,29 @@ class Ingenuity(VecTask):
         actions = _actions.to(self.device)
 
         thrust_action_speed_scale = 2000
-        vertical_thrust_prop_0 = torch.clamp(actions[:, 2] * thrust_action_speed_scale, -self.thrust_upper_limit, self.thrust_upper_limit)
-        vertical_thrust_prop_1 = torch.clamp(actions[:, 5] * thrust_action_speed_scale, -self.thrust_upper_limit, self.thrust_upper_limit)
-        lateral_fraction_prop_0 = torch.clamp(actions[:, 0:2], -self.thrust_lateral_component, self.thrust_lateral_component)
-        lateral_fraction_prop_1 = torch.clamp(actions[:, 3:5], -self.thrust_lateral_component, self.thrust_lateral_component)
+        # vertical_thrust_prop_0 = torch.clamp(actions[:, 2] * thrust_action_speed_scale, -self.thrust_upper_limit, self.thrust_upper_limit)
+        # vertical_thrust_prop_1 = torch.clamp(actions[:, 5] * thrust_action_speed_scale, -self.thrust_upper_limit, self.thrust_upper_limit)
+        # lateral_fraction_prop_0 = torch.clamp(actions[:, 0:2], -self.thrust_lateral_component, self.thrust_lateral_component)
+        # lateral_fraction_prop_1 = torch.clamp(actions[:, 3:5], -self.thrust_lateral_component, self.thrust_lateral_component)
 
-        self.thrusts[:, 0, 2] = self.dt * vertical_thrust_prop_0
-        self.thrusts[:, 0, 0:2] = self.thrusts[:, 0, 2, None] * lateral_fraction_prop_0
-        self.thrusts[:, 1, 2] = self.dt * vertical_thrust_prop_1
-        self.thrusts[:, 1, 0:2] = self.thrusts[:, 1, 2, None] * lateral_fraction_prop_1
+        # v_prop_0 = (1 - lateral_fraction_prop_0.norm(p=2, dim=-1))
+        # v_prop_1 = (1 - lateral_fraction_prop_0.norm(p=2, dim=-1))
 
-        self.forces[:, 1] = self.thrusts[:, 0]
-        self.forces[:, 3] = self.thrusts[:, 1]
+        # self.thrusts[:, 0, 2] = self.dt * vertical_thrust_prop_0
+        # self.thrusts[:, 0, 2] = self.dt * vertical_thrust_prop_0 * v_prop_0
+        # self.thrusts[:, 0, 0:2] = self.thrusts[:, 0, 2, None] * lateral_fraction_prop_0
+        # self.thrusts[:, 1, 2] = self.dt * vertical_thrust_prop_1
+        # self.thrusts[:, 1, 2] = self.dt * vertical_thrust_prop_1 * v_prop_1
+        # self.thrusts[:, 1, 0:2] = self.thrusts[:, 1, 2, None] * lateral_fraction_prop_1
+
+        self.thrusts[:, 0] = self.dt * torch.clamp(actions[:, 0:3] * thrust_action_speed_scale, -self.thrust_upper_limit, self.thrust_upper_limit)
+        # self.thrusts[:, 1] = self.dt * torch.clamp(actions[:, 3:6] * thrust_action_speed_scale, -self.thrust_upper_limit, self.thrust_upper_limit)
+
+        # self.forces[:, 1] = self.thrusts[:, 0] + self.thrusts[:, 1]
+        # self.forces[:, 1] = self.thrusts[:, 0]
+        # self.forces[:, 3] = self.thrusts[:, 1]
+
+        self.forces[:, 0] = self.thrusts[:, 0]
 
         # clear actions for reset envs
         self.thrusts[reset_env_ids] = 0.0
@@ -387,9 +407,10 @@ class Ingenuity(VecTask):
 
     def compute_observations(self):
         self.obs_buf[..., 0:3] = (self.target_root_positions - self.root_positions) / 3
-        self.obs_buf[..., 3:7] = self.root_quats
-        self.obs_buf[..., 7:10] = self.root_linvels / 2
-        self.obs_buf[..., 10:13] = self.root_angvels / math.pi
+        self.obs_buf[..., 3:6] = self.root_linvels / 2
+        # self.obs_buf[..., 3:7] = self.root_quats
+        # self.obs_buf[..., 7:10] = self.root_linvels / 2
+        # self.obs_buf[..., 10:13] = self.root_angvels / math.pi
         return self.obs_buf
 
     def compute_reward(self):
@@ -416,17 +437,18 @@ def compute_ingenuity_reward(root_positions, target_root_positions, root_quats, 
     pos_reward = 1.0 / (1.0 + target_dist * target_dist)
 
     # uprightness
-    ups = quat_axis(root_quats, 2)
-    tiltage = torch.abs(1 - ups[..., 2])
-    up_reward = 5.0 / (1.0 + tiltage * tiltage)
+    # ups = quat_axis(root_quats, 2)
+    # tiltage = torch.abs(1 - ups[..., 2])
+    # up_reward = 5.0 / (1.0 + tiltage * tiltage)
 
     # spinning
-    spinnage = torch.abs(root_angvels[..., 2])
-    spinnage_reward = 1.0 / (1.0 + spinnage * spinnage)
+    # spinnage = torch.abs(root_angvels[..., 2])
+    # spinnage_reward = 1.0 / (1.0 + spinnage * spinnage)
 
     # combined reward
     # uprigness and spinning only matter when close to the target
-    reward = pos_reward + pos_reward * (up_reward + spinnage_reward)
+    # reward = pos_reward + pos_reward * (up_reward + spinnage_reward)
+    reward = pos_reward
 
     # resets due to misbehavior
     ones = torch.ones_like(reset_buf)

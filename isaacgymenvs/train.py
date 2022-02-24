@@ -108,7 +108,8 @@ def launch_rlg_hydra(cfg: DictConfig):
         cfg.graphics_device_id,
         cfg.headless,
         multi_gpu=cfg.multi_gpu,
-        post_create_hook=post_create_hook if cfg.test else None,
+        # post_create_hook=post_create_hook if cfg.test else None,
+        post_create_hook=None,
     )
 
     # register the rl-games adapter to use inside the runner
