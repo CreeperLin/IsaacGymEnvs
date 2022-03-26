@@ -15,10 +15,13 @@ def obs_all_nearest_neighbors(
     num_envs: int,
     num_agents: int,
     max_num_obs: int,
+    max_dist: float = 0.,
 ) -> Tensor:
     pos = pos.view(num_envs, num_agents, -1)   # [E, N, 3]
     dist = torch.cdist(pos, pos)    # [E, N, N]
-    _, ind = torch.topk(dist, max_num_obs + 1, largest=False)     # [E, N, M+1]
+    val, ind = torch.topk(dist, max_num_obs + 1, largest=False)     # [E, N, M+1]
+    if max_dist:
+        ind[val > max_dist] = -1
     ind = ind[:, :, 1:]     # [E, N, M]
     return ind
 
@@ -60,7 +63,7 @@ def obs_same_team_index(
     return (
         (torch.arange(0, num_agents, device=ind.device) // num_agts_team).repeat(num_envs, 1).unsqueeze(-1)
         == (ind // num_agts_team)
-    )
+    )   # [E, N, M]
 
 
 @torch.jit.script
@@ -195,6 +198,8 @@ class MultiAgentVecTask(VecTask):
         self.actor_handles = []
         self.env_handles = []
         self.callbacks = {}
+        self.cam_pos = [20.0, 25.0, 10.0]
+        self.cam_target = [10.0, 15.0, 0.0]
 
         super().__init__(
             config=config, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless
@@ -430,6 +435,8 @@ class MultiAgentVecTask(VecTask):
     def set_viewer(self):
         """Create the viewer."""
         # if running with a viewer, set up keyboard shortcuts and camera
+        cam_pos = self.cam_pos
+        cam_target = self.cam_target
         if self.headless is False:
             cam_props = gymapi.CameraProperties()
             # subscribe to keyboard shortcuts
@@ -442,15 +449,13 @@ class MultiAgentVecTask(VecTask):
 
             # set the camera position based on up axis
             sim_params = self.gym.get_sim_params(self.sim)
-            if sim_params.up_axis == gymapi.UP_AXIS_Z:
-                cam_pos = gymapi.Vec3(20.0, 25.0, 3.0)
-                cam_target = gymapi.Vec3(10.0, 15.0, 0.0)
-            else:
-                cam_pos = gymapi.Vec3(20.0, 3.0, 25.0)
-                cam_target = gymapi.Vec3(10.0, 0.0, 15.0)
 
-            self.gym.viewer_camera_look_at(
-                self.viewer, None, cam_pos, cam_target)
+            if sim_params.up_axis != gymapi.UP_AXIS_Z:
+                cam_pos = [cam_pos[0], cam_pos[2], cam_pos[1]]
+                cam_target = [cam_target[0], cam_target[2], cam_target[1]]
+
+            env = self.get_env(0)
+            self.gym.viewer_camera_look_at(self.viewer, env, gymapi.Vec3(*cam_pos), gymapi.Vec3(*cam_target))
 
     def render(self):
         """Draw the frame to the viewer, and check for keyboard events."""

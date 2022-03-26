@@ -344,15 +344,18 @@ def compute_balljoust_observations(
     # obs_buf[..., 14:16] = dirs
 
     if num_agents > 1:
-        ind = obs_all_nearest_neighbors(root_positions, num_envs, num_agents, num_rng)
+        max_dist = 1.
+        ind = obs_all_nearest_neighbors(root_positions, num_envs, num_agents, num_rng, max_dist=max_dist)
         rel_obs_obs = obs_get_by_env_index(obs_buf[..., :n_obs], ind, num_envs, num_agents)
         rel_pos_obs = obs_rel_pos_by_env_index(root_positions, ind, num_envs, num_agents)
         team_obs = obs_same_team_index(ind, num_envs, num_agents, num_teams).float()
-        obs_buf[..., n_obs:] = torch.cat((
-            team_obs.view(obs_buf.shape[0], -1),
-            rel_pos_obs.view(obs_buf.shape[0], -1),
-            rel_obs_obs.view(obs_buf.shape[0], -1),
+        ma_obs = torch.cat((
+            team_obs.unsqueeze(-1),
+            rel_pos_obs,
+            rel_obs_obs,
         ), dim=-1)
+        ma_obs[ind == -1] = 0
+        obs_buf[..., n_obs:] = ma_obs.view(obs_buf.shape[0], -1)
 
     obs_buf[terminated_buf, :] = 0
 
@@ -431,7 +434,8 @@ def compute_balljoust_reward(
     # terminated = torch.where(root_positions[..., 2] < 0.3, ones, terminated)
     # cod_buf = torch.where(root_positions[..., 2] < 0.3, ones*2, cod_buf)
 
-    suicide_cost = -10.0
+    # suicide_cost = -10.0
+    suicide_cost = -1000.0
     reward = torch.where(terminated, torch.ones_like(reward) * suicide_cost, reward)
 
     if num_agents > 1:
